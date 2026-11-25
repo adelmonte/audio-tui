@@ -241,11 +241,10 @@ fn fill_node(n: &mut Node, p: &std::collections::BTreeMap<String, String>) {
     n.client_id = p.get("client.id").and_then(|s| s.parse().ok());
     n.device_id = p.get("device.id").and_then(|s| s.parse().ok());
     n.profile_device = p.get("card.profile.device").and_then(|s| s.parse().ok());
-    if n.channels.is_empty() {
-        if let Some(pos) = p.get("audio.position") {
+    if n.channels.is_empty()
+        && let Some(pos) = p.get("audio.position") {
             n.channels = pos.split([',', ' ']).filter(|x| !x.is_empty()).map(str::to_string).collect();
         }
-    }
     n.props = p.clone();
 }
 
@@ -629,11 +628,10 @@ fn bind_metadata(registry: &pw::registry::RegistryRc, obj: &pw::registry::Global
 // ---------------------------------------------------------------- commands
 
 fn set_node_props(node: &pw::node::Node, properties: Vec<Property>) {
-    if let Some(bytes) = serialize(Object { type_: libspa_sys::SPA_TYPE_OBJECT_Props, id: libspa_sys::SPA_PARAM_Props, properties }) {
-        if let Some(pod) = Pod::from_bytes(&bytes) {
+    if let Some(bytes) = serialize(Object { type_: libspa_sys::SPA_TYPE_OBJECT_Props, id: libspa_sys::SPA_PARAM_Props, properties })
+        && let Some(pod) = Pod::from_bytes(&bytes) {
             node.set_param(ParamType::Props, 0, pod);
         }
-    }
 }
 
 fn set_route(device: &pw::device::Device, index: i32, dev: i32, props: Vec<Property>) {
@@ -646,11 +644,10 @@ fn set_route(device: &pw::device::Device, index: i32, dev: i32, props: Vec<Prope
     }
     // save=true asks WirePlumber to remember it, like pavucontrol does.
     p.push(prop(libspa_sys::SPA_PARAM_ROUTE_save, Value::Bool(true)));
-    if let Some(bytes) = serialize(Object { type_: libspa_sys::SPA_TYPE_OBJECT_ParamRoute, id: libspa_sys::SPA_PARAM_Route, properties: p }) {
-        if let Some(pod) = Pod::from_bytes(&bytes) {
+    if let Some(bytes) = serialize(Object { type_: libspa_sys::SPA_TYPE_OBJECT_ParamRoute, id: libspa_sys::SPA_PARAM_Route, properties: p })
+        && let Some(pod) = Pod::from_bytes(&bytes) {
             device.set_param(ParamType::Route, 0, pod);
         }
-    }
 }
 
 /// Apply props either to the card route that owns this node, or the node.
@@ -658,12 +655,11 @@ fn node_or_route(id: u32, props: Vec<Property>, st: &St, px: &Rc<RefCell<Proxies
     let s = st.borrow();
     let p = px.borrow();
     let Some(n) = s.graph.nodes.get(&id) else { return };
-    if let Some((dev, r)) = s.graph.route_for(n) {
-        if let Some((d, _)) = p.devices.get(&dev.id) {
+    if let Some((dev, r)) = s.graph.route_for(n)
+        && let Some((d, _)) = p.devices.get(&dev.id) {
             set_route(d, r.index, r.device, props);
             return;
         }
-    }
     if let Some((node, _)) = p.nodes.get(&id) {
         set_node_props(node, props);
     }
@@ -719,11 +715,10 @@ fn execute(cmd: Cmd, core: &pw::core::CoreRc, registry: &pw::registry::RegistryR
             let p = px.borrow();
             if let Some((d, _)) = p.devices.get(&device) {
                 let props = vec![prop(libspa_sys::SPA_PARAM_PROFILE_index, Value::Int(index)), prop(libspa_sys::SPA_PARAM_PROFILE_save, Value::Bool(true))];
-                if let Some(bytes) = serialize(Object { type_: libspa_sys::SPA_TYPE_OBJECT_ParamProfile, id: libspa_sys::SPA_PARAM_Profile, properties: props }) {
-                    if let Some(pod) = Pod::from_bytes(&bytes) {
+                if let Some(bytes) = serialize(Object { type_: libspa_sys::SPA_TYPE_OBJECT_ParamProfile, id: libspa_sys::SPA_PARAM_Profile, properties: props })
+                    && let Some(pod) = Pod::from_bytes(&bytes) {
                         d.set_param(ParamType::Profile, 0, pod);
                     }
-                }
             }
         }
         Cmd::SetPort { device, route_index, route_device } => {
@@ -778,11 +773,10 @@ fn execute(cmd: Cmd, core: &pw::core::CoreRc, registry: &pw::registry::RegistryR
                     let s = st.borrow();
                     s.graph.nodes.get(&new).map(|n| (n.serial, n.kind() == NodeKind::Sink))
                 };
-                if let Some((serial, is_sink)) = info {
-                    if let Some(m) = start_meter(core, new, serial, is_sink, peaks.clone()) {
+                if let Some((serial, is_sink)) = info
+                    && let Some(m) = start_meter(core, new, serial, is_sink, peaks.clone()) {
                         px.borrow_mut().meters.insert(new, m);
                     }
-                }
             }
         }
     }
@@ -843,7 +837,7 @@ fn start_meter(core: &pw::core::CoreRc, id: u32, serial: u64, is_sink: bool, pea
                 let Some(bytes) = data.data() else { continue };
                 let size = size.min(bytes.len()) / 4 * 4;
                 let mut peak = 0f32;
-                for chunk in bytes[..size].chunks_exact(4) {
+                for chunk in bytes[..size].as_chunks::<4>().0 {
                     let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs();
                     if v > peak {
                         peak = v;

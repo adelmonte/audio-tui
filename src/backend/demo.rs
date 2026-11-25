@@ -276,7 +276,7 @@ fn fake_levels(g: &Graph, metered: &[u32], t: f32, peaks: &Peaks) {
             "Spotify" => 0.45 + 0.45 * ((t * 4.0).sin().abs() * (t * 9.0).sin().abs()),
             "Discord" if n.kind() == NodeKind::Playback => if (t * 0.7).sin() > 0.2 { 0.35 + 0.3 * (t * 13.0).sin().abs() } else { 0.0 },
             "Discord" | "OBS Studio" => 0.25 + 0.4 * (t * 11.0).sin().abs() * ((t * 0.9).sin() > -0.3) as i32 as f32,
-            "" => if (t % 6.0) < 0.4 { 0.6 } else { 0.0 },
+            "" if (t % 6.0) < 0.4 => { 0.6 },
             _ => 0.0,
         };
         let (vols, mute) = g.volume_of(n);
@@ -312,25 +312,23 @@ fn apply(g: &mut Graph, c: Cmd, ev: &UnboundedSender<Ev>) {
     match c {
         Cmd::SetVolume { node, volumes } => {
             let Some(n) = g.nodes.get(&node).cloned() else { return };
-            let route = n.device_id.and_then(|d| n.profile_device.map(|pd| (d, pd)));
-            if let Some((d, pd)) = route {
-                if let Some(r) = g.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd)) {
+            let route = n.device_id.zip(n.profile_device);
+            if let Some((d, pd)) = route
+                && let Some(r) = g.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd)) {
                     r.volumes = volumes;
                     return;
                 }
-            }
             if let Some(n) = g.nodes.get_mut(&node) {
                 n.volumes = volumes;
             }
         }
         Cmd::SetMute { node, mute } => {
             let Some(n) = g.nodes.get(&node).cloned() else { return };
-            if let (Some(d), Some(pd)) = (n.device_id, n.profile_device) {
-                if let Some(r) = g.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd)) {
+            if let (Some(d), Some(pd)) = (n.device_id, n.profile_device)
+                && let Some(r) = g.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd)) {
                     r.mute = mute;
                     return;
                 }
-            }
             if let Some(n) = g.nodes.get_mut(&node) {
                 n.mute = mute;
             }
@@ -384,22 +382,19 @@ fn apply(g: &mut Graph, c: Cmd, ev: &UnboundedSender<Ev>) {
             }
         }
         Cmd::SetPort { device, route_index, route_device } => {
-            if let Some(d) = g.devices.get_mut(&device) {
-                if let Some(er) = d.enum_routes.iter().find(|r| r.index == route_index).cloned() {
+            if let Some(d) = g.devices.get_mut(&device)
+                && let Some(er) = d.enum_routes.iter().find(|r| r.index == route_index).cloned() {
                     let vol = d.routes.iter().find(|r| r.device == route_device).map(|r| r.volumes.clone()).unwrap_or(vec![0.4, 0.4]);
                     d.routes.retain(|r| r.device != route_device);
                     d.routes.push(Route { device: route_device, volumes: vol, ..er });
                 }
-            }
         }
         Cmd::SetLatencyOffset { node, ns } => {
-            if let Some(n) = g.nodes.get(&node).cloned() {
-                if let (Some(d), Some(pd)) = (n.device_id, n.profile_device) {
-                    if let Some(r) = g.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd)) {
+            if let Some(n) = g.nodes.get(&node).cloned()
+                && let (Some(d), Some(pd)) = (n.device_id, n.profile_device)
+                    && let Some(r) = g.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd)) {
                         r.latency_offset_ns = ns;
                     }
-                }
-            }
         }
         Cmd::SetSetting { key, value } => {
             match value {

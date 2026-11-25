@@ -130,6 +130,7 @@ pub fn unescape(s: &str) -> String {
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // counterpart of unescape; used by tests
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for c in s.chars() {

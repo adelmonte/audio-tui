@@ -45,7 +45,6 @@ pub enum Ev {
     Graph(Box<Graph>),
     Disconnected(String),
     Ok(String),
-    Info(String),
     Error(String),
 }
 

@@ -110,6 +110,7 @@ max_quantum = 0
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Config {
     pub general: General,
     pub aliases: BTreeMap<String, String>,
@@ -123,21 +124,6 @@ pub struct Config {
     pub keys: std::collections::HashMap<String, Vec<String>>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: General::default(),
-            aliases: BTreeMap::new(),
-            devices: BTreeMap::new(),
-            privacy: Privacy::default(),
-            clock: Clock::default(),
-            routing: Vec::new(),
-            virtuals: Vec::new(),
-            theme: ThemeConfig::default(),
-            keys: Default::default(),
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
