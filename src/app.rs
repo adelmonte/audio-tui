@@ -213,6 +213,9 @@ pub struct App {
     pub expanded: HashSet<u32>,
     /// Privacy tab: state files whose entries are shown.
     pub priv_open: HashSet<String>,
+    /// Volume/mute we set but PipeWire hasn't echoed back yet. Kept on top of
+    /// incoming snapshots so the slider doesn't jump back to stale values.
+    pending_vol: HashMap<u32, (Vec<f32>, Option<bool>, Instant)>,
     pub list_offset: HashMap<Tab, usize>,
     pub list_height: usize,
     pub filter: Option<TextInput>,
@@ -271,6 +274,7 @@ impl App {
             row_sel: HashMap::new(),
             expanded: HashSet::new(),
             priv_open: HashSet::new(),
+            pending_vol: HashMap::new(),
             list_offset: HashMap::new(),
             list_height: 10,
             filter: None,
@@ -491,6 +495,7 @@ impl App {
                     self.metered.clear(); // meters must be re-created on the new connection
                 }
                 self.graph = *g;
+                self.reapply_pending_vol();
                 self.loaded = true;
                 if first {
                     // Start on the tab that has something going on.
@@ -849,6 +854,28 @@ impl App {
     /// Optimistically update our copy so held keys accumulate before the
     /// backend's snapshot arrives.
     fn local_set(&mut self, id: u32, vols: Vec<f32>, mute: Option<bool>) {
+        let mute = mute.or_else(|| self.pending_vol.get(&id).and_then(|p| p.1));
+        self.pending_vol.insert(id, (vols.clone(), mute, Instant::now()));
+        self.overlay_vol(id, vols, mute);
+    }
+
+    fn reapply_pending_vol(&mut self) {
+        let pending = std::mem::take(&mut self.pending_vol);
+        for (id, (vols, mute, at)) in pending {
+            let Some(n) = self.graph.nodes.get(&id) else { continue };
+            let (cur, cur_mute) = self.graph.volume_of(n);
+            let echoed = cur.len() == vols.len()
+                && cur.iter().zip(&vols).all(|(a, b)| (linear_to_percent(*a) - linear_to_percent(*b)).abs() < 0.5)
+                && mute.is_none_or(|m| m == cur_mute);
+            if echoed || at.elapsed() > Duration::from_millis(600) {
+                continue;
+            }
+            self.overlay_vol(id, vols.clone(), mute);
+            self.pending_vol.insert(id, (vols, mute, at));
+        }
+    }
+
+    fn overlay_vol(&mut self, id: u32, vols: Vec<f32>, mute: Option<bool>) {
         let Some(n) = self.graph.nodes.get(&id).cloned() else { return };
         let route = n.device_id.zip(n.profile_device);
         if let Some((d, pd)) = route {
