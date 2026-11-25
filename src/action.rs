@@ -19,7 +19,6 @@ define_actions! {
         Tab6 => "tab_virtual", "Go to Virtual devices", ["6"],
         Tab7 => "tab_settings", "Go to Settings", ["7"],
         Tab8 => "tab_privacy", "Go to Privacy", ["8"],
-        Tab9 => "tab_stack", "Go to Guide (how audio works)", ["9"],
         Up => "up", "Move up", ["k", "up"],
         Down => "down", "Move down", ["j", "down"],
         Top => "top", "Jump to top", ["g", "home"],
@@ -73,7 +72,6 @@ pub enum Ctx {
     Virtual,
     Settings,
     Privacy,
-    Stack,
 }
 
 impl Action {
@@ -108,7 +106,6 @@ impl Action {
             Ctx::Virtual => &[NewVirtual, DeleteVirtual, TempSink, Apply, Help],
             Ctx::Settings => &[Change, Reset, Apply, Help],
             Ctx::Privacy => &[Change, Forget, ForgetFile, Apply, Help],
-            Ctx::Stack => &[Down, Up, Help],
         }
     }
 

@@ -38,11 +38,10 @@ pub enum Tab {
     Virtual,
     Settings,
     Privacy,
-    Stack,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] = [Tab::Playback, Tab::Recording, Tab::Outputs, Tab::Inputs, Tab::Cards, Tab::Virtual, Tab::Settings, Tab::Privacy, Tab::Stack];
+    pub const ALL: [Tab; 8] = [Tab::Playback, Tab::Recording, Tab::Outputs, Tab::Inputs, Tab::Cards, Tab::Virtual, Tab::Settings, Tab::Privacy];
     pub fn title(self) -> &'static str {
         match self {
             Tab::Playback => "Playback",
@@ -53,7 +52,6 @@ impl Tab {
             Tab::Virtual => "Virtual",
             Tab::Settings => "Settings",
             Tab::Privacy => "Privacy",
-            Tab::Stack => "Guide",
         }
     }
     pub fn ctx(self) -> Ctx {
@@ -64,7 +62,6 @@ impl Tab {
             Tab::Virtual => Ctx::Virtual,
             Tab::Settings => Ctx::Settings,
             Tab::Privacy => Ctx::Privacy,
-            Tab::Stack => Ctx::Stack,
         }
     }
     pub fn kind(self) -> Option<NodeKind> {
@@ -241,7 +238,6 @@ pub struct App {
     pub pending: Vec<(PathBuf, &'static str)>,
     pub config_errors: Vec<String>,
     pub state_files: Vec<StateFile>,
-    pub stack_scroll: u16,
 }
 
 impl App {
@@ -296,7 +292,6 @@ impl App {
             pending: Vec::new(),
             config_errors: Vec::new(),
             state_files: Vec::new(),
-            stack_scroll: 0,
         };
         app.refresh_pending();
         app.reload_state();
@@ -449,7 +444,6 @@ impl App {
             Tab::Virtual => self.virt_rows().len(),
             Tab::Settings => self.set_rows().len(),
             Tab::Privacy => self.priv_rows().len(),
-            Tab::Stack => 0,
             _ => self.mix_rows(self.tab).len(),
         }
     }
@@ -478,10 +472,6 @@ impl App {
     }
 
     fn move_sel(&mut self, d: isize) {
-        if self.tab == Tab::Stack {
-            self.stack_scroll = (self.stack_scroll as isize + d).max(0) as u16;
-            return;
-        }
         let n = self.row_count();
         if n == 0 {
             return;
@@ -996,7 +986,6 @@ impl App {
             Ctx::Virtual => vec![NewVirtual, DeleteVirtual, TempSink, Apply],
             Ctx::Settings => vec![Change, Reset, Apply],
             Ctx::Privacy => vec![Change, Forget, ForgetFile, Reload, Apply],
-            Ctx::Stack => return,
         };
         let items = acts.into_iter().map(|a| (self.action_label(a), self.keymap.hint(a).unwrap_or_default(), MenuItem::Run(a), false)).collect();
         self.popup = Some(Popup::Menu(crate::app::Menu { title: "Actions".into(), items, sel: 0, at: at.unwrap_or((0, 0)) }));
@@ -1381,8 +1370,8 @@ impl App {
                 self.tab = Tab::ALL[if a == NextTab { (i + 1) % n } else { (i + n - 1) % n }];
                 self.on_tab_change();
             }
-            Tab1 | Tab2 | Tab3 | Tab4 | Tab5 | Tab6 | Tab7 | Tab8 | Tab9 => {
-                let i = [Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9].iter().position(|x| *x == a).unwrap_or(0);
+            Tab1 | Tab2 | Tab3 | Tab4 | Tab5 | Tab6 | Tab7 | Tab8 => {
+                let i = [Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8].iter().position(|x| *x == a).unwrap_or(0);
                 self.tab = Tab::ALL[i];
                 self.on_tab_change();
             }

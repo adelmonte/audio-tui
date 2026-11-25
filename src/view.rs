@@ -27,7 +27,7 @@ pub fn render(app: &mut App, f: &mut Frame) {
     if !app.loaded {
         empty_state(f, body, &app.theme, &format!("{} Connecting to PipeWire…", spinner(app.tick)), &[]);
     } else if let (Some(m), true) = (app.disconnected.clone(), app.tab.kind().is_some() || app.tab == Tab::Cards) {
-        empty_state(f, body, &app.theme, "PipeWire is not reachable", &[&m, "", "The Settings, Privacy and How-it-works tabs still work."]);
+        empty_state(f, body, &app.theme, "PipeWire is not reachable", &[&m, "", "The Settings and Privacy tabs still work."]);
     } else {
         match app.tab {
             Tab::Playback | Tab::Recording | Tab::Outputs | Tab::Inputs => render_mixer(app, f, body),
@@ -35,7 +35,6 @@ pub fn render(app: &mut App, f: &mut Frame) {
             Tab::Virtual => render_virtual(app, f, body),
             Tab::Settings => render_settings(app, f, body),
             Tab::Privacy => render_privacy(app, f, body),
-            Tab::Stack => render_stack(app, f, body),
         }
     }
     render_footer(app, f, footer);
@@ -1008,92 +1007,6 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
     }
 }
 
-// ---------------------------------------------------------------- stack
-
-const FLOW_COL: usize = 72;
-
-/// Pad a diagram row with ─ so every connector lands in the same column.
-fn flow(left: &str, end: char) -> String {
-    let w = left.width();
-    format!("{left}{}{end}", "─".repeat(FLOW_COL.saturating_sub(w)))
-}
-
-fn render_stack(app: &mut App, f: &mut Frame, area: Rect) {
-    let t = app.theme.clone();
-    let block = panel(&t, "Guide — how Linux audio fits together", true);
-    let inner = block.inner(area).inner(Margin::new(2, 0));
-    f.render_widget(block, area);
-    let g = &app.graph;
-    let alsa = g.devices.values().filter(|d| d.api == "alsa").count();
-    let bt = g.devices.values().filter(|d| d.api == "bluez5").count();
-    let pulse = g.nodes.values().filter(|n| n.kind().is_stream() && n.props.get("client.api").is_some_and(|a| a == "pipewire-pulse")).count();
-    let native = g.nodes.values().filter(|n| n.kind().is_stream() && !app.is_internal(n)).count() - pulse;
-    let wp = !g.sm_settings.is_empty() || g.default_sink.is_some();
-    let h = |s: &str| Line::from(Span::styled(s.to_string(), t.accent().add_modifier(Modifier::BOLD)));
-    let p = |s: &str| Line::from(Span::styled(s.to_string(), t.text()));
-    let d = |s: &str| Line::from(Span::styled(s.to_string(), t.dim()));
-    let live = |label: &str, v: String| Line::from(vec![Span::styled(format!("  {label:<26}"), t.dim()), Span::styled(v, t.bold())]);
-    let mut lines = vec![
-        h("The short version"),
-        p("Apps → PipeWire (mixes everything) → ALSA drivers → your speakers. WirePlumber decides the routing and remembers your choices."),
-        Line::raw(""),
-        d(&flow("   Firefox, Spotify, Discord ─(PulseAudio API)─▶ pipewire-pulse ", '┐')),
-        d(&flow("   mpv, OBS, games ─(native PipeWire API)", '┤')),
-        d(&flow("   old ALSA-only programs ─▶ pipewire-alsa plugin ", '┤')),
-        d(&format!("{}▼", " ".repeat(FLOW_COL))),
-        d(&flow("   WirePlumber ─(decides & remembers)─▶ PipeWire: mix, route, clock ", '┤')),
-        d(&format!("{}▼", " ".repeat(FLOW_COL))),
-        d(&flow("   BlueZ (Bluetooth) ◀", '┤')),
-        d(&flow("   ALSA kernel drivers (/dev/snd) ◀", '┘')),
-        d("                       └──▶ speakers, headphones, mics, HDMI"),
-        Line::raw(""),
-        h("Live on this machine"),
-        live("PipeWire", if g.server_version.is_empty() { "—".into() } else { g.server_version.clone() }),
-        live("WirePlumber", if wp { "running".into() } else { "not detected".into() }),
-        live("Sound cards (ALSA)", alsa.to_string()),
-        live("Bluetooth audio devices", bt.to_string()),
-        live("Apps via PulseAudio API", pulse.to_string()),
-        live("Native PipeWire apps", native.to_string()),
-        live("Sample rate / buffer", format!("{} Hz / {}", g.settings.get("clock.rate").cloned().unwrap_or("?".into()), g.settings.get("clock.quantum").cloned().unwrap_or("?".into()))),
-        Line::raw(""),
-        h("Do I still need ALSA / alsamixer?"),
-        p("ALSA is the kernel driver layer: it's always there and you don't configure it. PipeWire talks to it for you and maps its own"),
-        p("device volume onto the card's hardware mixer. alsamixer is only for odd hardware switches (e.g. an \"Auto-Mute\" or a"),
-        p("muted mic boost) that PipeWire doesn't expose. Set it once if needed, then forget it."),
-        Line::raw(""),
-        h("So where's the \"master\" volume?"),
-        p("Each output's volume in the Outputs tab is its master. App sliders (Playback tab) scale each app before mixing. Your"),
-        p("keyboard volume keys change the default output's volume."),
-        Line::raw(""),
-        h("What does WirePlumber remember, and where?"),
-        p("Files in ~/.local/state/wireplumber/: app volumes & devices (stream-properties, or stream-props/stream-target on newer"),
-        p("versions), your default devices, and per-card profile/port/volume. The Privacy tab shows exactly what's in there and lets"),
-        p("you limit or delete it. Browsers report their app name, so tabs aren't normally stored, but apps without a name are"),
-        p("stored by what they were playing."),
-        Line::raw(""),
-        h("Where do settings live?"),
-        p("audio-tui keeps everything in ~/.config/audio-tui/config.toml. System changes (renames, privacy, virtual devices, clock)"),
-        p("are turned into these drop-in files when you press Ctrl-S — nothing else on your system is edited:"),
-    ];
-    let (files, _) = crate::backend::conf::generate(&app.cfg, &app.dirs);
-    for fl in files {
-        let exists = fl.path.exists();
-        lines.push(Line::from(vec![
-            Span::styled(if exists { "  ✓ " } else { "  · " }, if exists { t.ok() } else { t.dim() }),
-            Span::styled(fl.path.display().to_string(), if exists { t.text() } else { t.dim() }),
-            Span::styled(format!("  ({})", fl.topic), t.dim()),
-        ]));
-    }
-    lines.push(Line::raw(""));
-    lines.push(h("Handy commands"));
-    lines.push(d("  wpctl status            overview of devices and apps"));
-    lines.push(d("  pw-top                  live load per node"));
-    lines.push(d("  systemctl --user restart pipewire pipewire-pulse wireplumber"));
-    let max = (lines.len() as u16).saturating_sub(inner.height);
-    app.stack_scroll = app.stack_scroll.min(max);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.stack_scroll, 0)), inner);
-}
-
 // ---------------------------------------------------------------- popups
 
 fn render_popup(app: &mut App, f: &mut Frame, area: Rect) {
@@ -1232,7 +1145,7 @@ mod snapshots {
     }
 
     #[test]
-    fn snap_privacy_stack() {
+    fn snap_privacy() {
         let mut a = app();
         let dir = a.state_dir();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1241,7 +1154,5 @@ mod snapshots {
         a.tab = Tab::Privacy;
         a.reload_state();
         println!("{}", dump(&mut a, 120, 24));
-        a.tab = Tab::Stack;
-        println!("{}", dump(&mut a, 130, 46));
     }
 }
