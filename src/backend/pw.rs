@@ -435,11 +435,17 @@ fn bind_node(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalObje
         .info({
             let st = st.clone();
             move |info| {
+                if !info.change_mask().contains(pw::node::NodeChangeMask::PROPS) {
+                    return;
+                }
                 if let Some(p) = info.props() {
                     let p = dict(p);
                     let mut s = st.borrow_mut();
                     if let Some(n) = s.graph.nodes.get_mut(&id) {
-                        fill_node(n, &p);
+                        // Updates may carry only some keys; never drop what the registry already told us.
+                        let mut merged = n.props.clone();
+                        merged.extend(p);
+                        fill_node(n, &merged);
                     }
                     s.dirty = true;
                 }
@@ -497,14 +503,17 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
         .info({
             let st = st.clone();
             move |info| {
+                if !info.change_mask().contains(pw::device::DeviceChangeMask::PROPS) {
+                    return;
+                }
                 if let Some(p) = info.props() {
                     let p = dict(p);
                     let mut s = st.borrow_mut();
                     if let Some(d) = s.graph.devices.get_mut(&id) {
-                        let g = |k: &str| p.get(k).cloned().unwrap_or_default();
+                        d.props.extend(p);
+                        let g = |k: &str| d.props.get(k).cloned().unwrap_or_default();
                         d.description = g("device.description");
                         d.nick = g("device.nick");
-                        d.props = p.clone();
                     }
                     s.dirty = true;
                 }
