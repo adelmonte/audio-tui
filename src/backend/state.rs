@@ -153,7 +153,11 @@ fn classify(key: &str) -> EntryKind {
     let (Some(head), Some(by), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
         return if key.contains("alsa_card") || key.contains("bluez_card") || key.contains(':') { EntryKind::Device } else { EntryKind::Other };
     };
-    if let Some(dir) = head.strip_suffix("/Audio").filter(|d| *d == "Output" || *d == "Input") {
+    // state-stream keys are "<media.class minus Stream/>:<prop>:<value>", e.g.
+    // "Output/Audio", "Input/Audio/Internal" or "Audio/Sink" for virtual sinks.
+    let stream_prop = matches!(by, "application.id" | "application.name" | "application.process.binary" | "media.name" | "media.role" | "node.name");
+    if stream_prop && !head.contains("_card") {
+        let dir = if head.starts_with("Input") || head.starts_with("Audio/Source") { "Input" } else { "Output" };
         let who = rest.split(":stream:").next().unwrap_or(rest).to_string();
         return EntryKind::Stream { dir: dir.to_string(), by: by.to_string(), who };
     }
@@ -202,7 +206,7 @@ pub fn load_all(dir: &Path) -> Vec<StateFile> {
         .filter(|e| e.path().is_file())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name.ends_with('~') || name.ends_with(".tmp") {
+            if name.starts_with('.') || name.ends_with('~') || name.ends_with(".tmp") || name.contains(".bak") {
                 return None;
             }
             let text = std::fs::read_to_string(e.path()).ok()?;

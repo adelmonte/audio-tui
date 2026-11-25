@@ -105,6 +105,7 @@ pub enum PrivRow {
     Mode,
     Allowlist,
     Prune,
+    ForgetAll,
     File(usize),
     Entry(usize, usize),
 }
@@ -213,6 +214,8 @@ pub struct App {
     pub mix_sel: HashMap<Tab, MixSel>,
     pub row_sel: HashMap<Tab, usize>,
     pub expanded: HashSet<u32>,
+    /// Privacy tab: state files whose entries are shown.
+    pub priv_open: HashSet<String>,
     pub list_offset: HashMap<Tab, usize>,
     pub list_height: usize,
     pub filter: Option<TextInput>,
@@ -271,6 +274,7 @@ impl App {
             mix_sel: HashMap::new(),
             row_sel: HashMap::new(),
             expanded: HashSet::new(),
+            priv_open: HashSet::new(),
             list_offset: HashMap::new(),
             list_height: 10,
             filter: None,
@@ -425,10 +429,15 @@ impl App {
             v.push(PrivRow::Allowlist);
         }
         v.push(PrivRow::Prune);
+        if !self.state_files.is_empty() {
+            v.push(PrivRow::ForgetAll);
+        }
         for (fi, f) in self.state_files.iter().enumerate() {
             v.push(PrivRow::File(fi));
-            for ei in 0..f.entries.len() {
-                v.push(PrivRow::Entry(fi, ei));
+            if self.priv_open.contains(&f.name) {
+                for ei in 0..f.entries.len() {
+                    v.push(PrivRow::Entry(fi, ei));
+                }
             }
         }
         v
@@ -477,17 +486,7 @@ impl App {
         if n == 0 {
             return;
         }
-        let mut i = (self.row_index() as isize + d).clamp(0, n as isize - 1) as usize;
-        // Skip file header rows in Privacy so j/k land on things you can act on.
-        if self.tab == Tab::Privacy {
-            let rows = self.priv_rows();
-            while matches!(rows.get(i), Some(PrivRow::File(_))) && i + 1 < n && d >= 0 {
-                i += 1;
-            }
-            while matches!(rows.get(i), Some(PrivRow::File(_))) && i > 0 && d < 0 {
-                i -= 1;
-            }
-        }
+        let i = (self.row_index() as isize + d).clamp(0, n as isize - 1) as usize;
         self.select_row(i);
     }
 
@@ -1724,23 +1723,17 @@ impl App {
     fn change_privacy(&mut self) {
         let rows = self.priv_rows();
         let Some(row) = rows.get(self.row_index()).cloned() else { return };
-        let runtime = |app: &mut Self, keys: [&str; 2], on: bool| {
-            // Take effect now; the drop-in makes it permanent after Ctrl-S.
-            for k in keys {
-                app.send(Cmd::SetSmSetting { key: k.into(), value: on.to_string(), persist: false });
-            }
-        };
         match row {
             PrivRow::RememberVolumes => {
                 let on = !self.cfg.privacy.remember_volumes;
                 if self.edit_config(|e| e.set("privacy", "remember_volumes", value(on))) {
-                    runtime(self, ["node.stream.restore-props", "stream.restore-props"], on && self.cfg.privacy.mode != PrivacyMode::None);
+                    self.apply_privacy_now();
                 }
             }
             PrivRow::RememberDevices => {
                 let on = !self.cfg.privacy.remember_devices;
                 if self.edit_config(|e| e.set("privacy", "remember_devices", value(on))) {
-                    runtime(self, ["node.stream.restore-target", "stream.restore-target"], on && self.cfg.privacy.mode != PrivacyMode::None);
+                    self.apply_privacy_now();
                 }
             }
             PrivRow::Mode => {
@@ -1749,8 +1742,11 @@ impl App {
                     PrivacyMode::Allowlist => "none",
                     PrivacyMode::None => "all",
                 };
-                if self.edit_config(|e| e.set("privacy", "mode", value(next))) && next == "allowlist" && self.cfg.privacy.allowlist.is_empty() {
-                    self.toasts.push(Level::Info, "Add the apps WirePlumber may remember on the Allowlist row");
+                if self.edit_config(|e| e.set("privacy", "mode", value(next))) {
+                    self.apply_privacy_now();
+                    if next == "allowlist" && self.cfg.privacy.allowlist.is_empty() {
+                        self.toasts.push(Level::Info, "Add the apps WirePlumber may remember on the Allowlist row (Ctrl-S applies per-app rules)");
+                    }
                 }
             }
             PrivRow::Allowlist => {
@@ -1770,9 +1766,52 @@ impl App {
                 let on = !self.cfg.privacy.prune_titles_on_start;
                 self.edit_config(|e| e.set("privacy", "prune_titles_on_start", value(on)));
             }
-            PrivRow::File(_) => {}
+            PrivRow::ForgetAll => {
+                let paths: Vec<PathBuf> = self.state_files.iter().map(|f| f.path.clone()).collect();
+                let n: usize = self.state_files.iter().map(|f| f.entries.len()).sum();
+                let after = if self.remembers_apps() != (false, false) { "Apps will be remembered again from now on." } else { "App memory is off, so nothing per-app comes back." };
+                self.popup = Some(Popup::Confirm {
+                    title: "Forget everything".into(),
+                    msg: format!(
+                        "Delete all {} WirePlumber state files ({n} entries): app volumes and devices, default-device history, card ports and volumes. Your default output and card volumes reset until you pick them again. {after} WirePlumber restarts briefly.",
+                        paths.len()
+                    ),
+                    yes: "Forget all".into(),
+                    yes_sel: false,
+                    on_yes: OnYes::ForgetFiles(paths),
+                });
+            }
+            PrivRow::File(fi) => {
+                let name = self.state_files[fi].name.clone();
+                if !self.priv_open.remove(&name) {
+                    self.priv_open.insert(name);
+                }
+            }
             PrivRow::Entry(..) => self.run(Action::Forget),
         }
+    }
+
+    pub fn remembers_apps(&self) -> (bool, bool) {
+        let p = &self.cfg.privacy;
+        let on = p.mode != PrivacyMode::None;
+        (p.remember_volumes && on, p.remember_devices && on)
+    }
+
+    /// Privacy switches take effect at once: live via WirePlumber's settings
+    /// metadata, and permanently via the privacy drop-in (no restart needed).
+    fn apply_privacy_now(&mut self) {
+        let (props, target) = self.remembers_apps();
+        self.send(Cmd::SetSmSetting { key: "node.stream.restore-props".into(), value: props.to_string(), persist: false });
+        self.send(Cmd::SetSmSetting { key: "node.stream.restore-target".into(), value: target.to_string(), persist: false });
+        if self.demo {
+            return;
+        }
+        let (files, _) = conf::generate(&self.cfg, &self.dirs);
+        let privacy: Vec<_> = files.into_iter().filter(|f| f.topic == "privacy").collect();
+        if let Err(e) = conf::apply(&privacy) {
+            self.toasts.push(Level::Error, format!("Couldn't write privacy drop-in: {e}"));
+        }
+        self.refresh_pending();
     }
 
     /// Delete entries keyed by media titles (privacy.prune_titles_on_start).

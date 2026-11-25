@@ -292,16 +292,9 @@ fn privacy_wireplumber(cfg: &Config) -> Option<String> {
     let target = p.remember_devices && p.mode != PrivacyMode::None;
     let mut sections = Vec::new();
     if !props || !target {
-        // WirePlumber 0.5.x uses node.stream.*, newer releases stream.*.
-        // Setting both is harmless and keeps this working across upgrades.
         sections.push((
             "wireplumber.settings",
-            obj(vec![
-                ("node.stream.restore-props", J::Bool(props)),
-                ("node.stream.restore-target", J::Bool(target)),
-                ("stream.restore-props", J::Bool(props)),
-                ("stream.restore-target", J::Bool(target)),
-            ]),
+            obj(vec![("node.stream.restore-props", J::Bool(props)), ("node.stream.restore-target", J::Bool(target))]),
         ));
     }
     if let Some(rules) = privacy_stream_rules(cfg) {
@@ -666,8 +659,8 @@ mod tests {
         c.privacy.remember_volumes = false;
         let wp = privacy_wireplumber(&c).unwrap();
         assert!(wp.contains("node.stream.restore-props = false"));
-        assert!(wp.contains("stream.restore-props = false"));
-        assert!(wp.contains("stream.restore-target = true"));
+        assert!(wp.contains("node.stream.restore-target = true"));
+        assert!(!wp.contains("\n  stream.restore"));
 
         let mut c = cfg();
         c.privacy.mode = PrivacyMode::Allowlist;

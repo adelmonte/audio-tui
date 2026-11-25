@@ -961,10 +961,16 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
             }
             PrivRow::Allowlist => setting("  Allowlist", Span::styled(if p.allowlist.is_empty() { "(empty)".to_string() } else { p.allowlist.join(", ") }, t.bold()), "Enter to edit"),
             PrivRow::Prune => setting("Clean titles at start", toggle(p.prune_titles_on_start, &t), "delete ⚠ entries each time audio-tui opens"),
+            PrivRow::ForgetAll => {
+                let n: usize = app.state_files.iter().map(|f| f.entries.len()).sum();
+                setting("Forget everything", Span::styled(format!("{n} entries"), t.warn()), "Enter: delete all of WirePlumber's memory")
+            }
             PrivRow::File(fi) => {
                 let sf = &app.state_files[*fi];
+                let open = app.priv_open.contains(&sf.name);
                 Line::from(vec![
-                    Span::raw(" "),
+                    mark,
+                    Span::styled(if open { "▾ " } else { "▸ " }, t.dim()),
                     Span::styled(format!("{} ", sf.name), t.accent().add_modifier(Modifier::BOLD)),
                     Span::styled(format!("· {} entries · {}", sf.entries.len(), sf.description()), t.dim()),
                 ])
@@ -988,9 +994,7 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
             }
         };
         f.render_widget(line.style(base), r);
-        if !matches!(row, PrivRow::File(_)) {
-            app.mouse.add(r, Target::Row(i));
-        }
+        app.mouse.add(r, Target::Row(i));
     }
     if app.state_files.is_empty() {
         let y = list.y + 6;
