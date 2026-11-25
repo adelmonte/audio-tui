@@ -265,6 +265,9 @@ struct Shared {
     dirty: bool,
     /// (device id, param id) -> seq of the batch being received.
     param_seq: HashMap<(u32, u32), i32>,
+    /// Devices whose params changed and must be enumerated again.
+    refetch: HashSet<u32>,
+    next_seq: i32,
 }
 
 type St = Rc<RefCell<Shared>>;
@@ -292,7 +295,7 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
         Err(e) => return (rx, Err(e.to_string())),
     };
 
-    let st: St = Rc::new(RefCell::new(Shared { graph: Graph { connected: true, ..Default::default() }, dirty: true, param_seq: HashMap::new() }));
+    let st: St = Rc::new(RefCell::new(Shared { graph: Graph { connected: true, ..Default::default() }, dirty: true, param_seq: HashMap::new(), refetch: HashSet::new(), next_seq: 1000 }));
     let px: Rc<RefCell<Proxies>> = Rc::default();
 
     // Lost connection (e.g. pipewire restarted): tell the UI and stop.
@@ -386,8 +389,22 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
     // Publish coalesced snapshots.
     let timer = mainloop.loop_().add_timer({
         let st = st.clone();
+        let px = px.clone();
         let ev = ev.clone();
         move |_| {
+            let ids: Vec<u32> = st.borrow_mut().refetch.drain().collect();
+            for id in ids {
+                if let Some((d, _)) = px.borrow().devices.get(&id) {
+                    for pt in DEVICE_PARAMS {
+                        let seq = {
+                            let mut s = st.borrow_mut();
+                            s.next_seq = s.next_seq.wrapping_add(1).max(1000);
+                            s.next_seq
+                        };
+                        d.enum_params(seq, Some(pt), 0, u32::MAX);
+                    }
+                }
+            }
             let mut s = st.borrow_mut();
             if s.dirty {
                 s.dirty = false;
@@ -472,6 +489,8 @@ fn bind_node(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalObje
     px.borrow_mut().nodes.insert(id, (node, Box::new(listener)));
 }
 
+const DEVICE_PARAMS: [ParamType; 4] = [ParamType::EnumProfile, ParamType::Profile, ParamType::EnumRoute, ParamType::Route];
+
 fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalObject<&DictRef>, props: &std::collections::BTreeMap<String, String>, st: &St, px: &Rc<RefCell<Proxies>>) {
     if props.get("media.class").map(String::as_str) != Some("Audio/Device") {
         return;
@@ -497,12 +516,17 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
         );
         s.dirty = true;
     }
-    let params = [ParamType::EnumProfile, ParamType::Profile, ParamType::EnumRoute, ParamType::Route];
+    let params = DEVICE_PARAMS;
     let listener = device
         .add_listener_local()
         .info({
             let st = st.clone();
             move |info| {
+                // Route/profile changes (volume, mute, port) only show up as
+                // a PARAMS change; the new values have to be asked for.
+                if info.change_mask().contains(pw::device::DeviceChangeMask::PARAMS) {
+                    st.borrow_mut().refetch.insert(id);
+                }
                 if !info.change_mask().contains(pw::device::DeviceChangeMask::PROPS) {
                     return;
                 }
