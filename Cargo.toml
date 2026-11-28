@@ -1,6 +1,6 @@
 [package]
 name = "audio-tui"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "A modern terminal mixer and control panel for PipeWire"
 license = "GPL-3.0-or-later"

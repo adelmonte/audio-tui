@@ -1,6 +1,6 @@
 # Maintainer: adelmonte
 pkgname=audio-tui
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc='A modern terminal mixer and control panel for PipeWire'
 arch=('x86_64')
