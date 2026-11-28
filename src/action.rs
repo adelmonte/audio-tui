@@ -42,6 +42,7 @@ define_actions! {
         MoveTo => "move_to", "Send to another device", ["enter", "o"],
         FollowDefault => "follow_default", "Follow the default device", ["f"],
         AlwaysHere => "always_here", "Always send this app to its current device", ["R"],
+        Remember => "remember", "Always remember this app, even with app memory off", ["s"],
         // devices
         SetDefault => "set_default", "Make default", ["enter", "d"],
         Port => "port", "Choose port (speakers/headphones/HDMI…)", ["p"],
@@ -80,7 +81,7 @@ impl Action {
         use Ctx::*;
         match self {
             VolUp | VolDown | VolUpFine | VolDownFine | SetVolume | Mute | Channels | Alias => matches!(ctx, Streams | Devices),
-            MoveTo | FollowDefault | AlwaysHere => ctx == Streams,
+            MoveTo | FollowDefault | AlwaysHere | Remember => ctx == Streams,
             SetDefault | Port | Profile | Latency => ctx == Devices,
             Rename | Disable => matches!(ctx, Devices | Cards),
             CardProfile => ctx == Cards,
@@ -113,7 +114,7 @@ impl Action {
         use Action::*;
         match self {
             VolUp | VolDown | VolUpFine | VolDownFine | SetVolume | Mute | Channels | Alias => "Mixer tabs (1–4)",
-            MoveTo | FollowDefault | AlwaysHere => "Playback & Recording",
+            MoveTo | FollowDefault | AlwaysHere | Remember => "Playback & Recording",
             SetDefault | Port | Profile | Latency | Rename | Disable => "Outputs, Inputs & Cards",
             CardProfile => "Outputs, Inputs & Cards",
             NewVirtual | DeleteVirtual | TempSink => "Virtual devices",

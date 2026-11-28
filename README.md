@@ -58,6 +58,7 @@ audio-tui [--demo] [-c|--config PATH] [--print-default-config] [--apply]
 | `m` | Mute |
 | `Enter` | Send app to a device / make device default |
 | `c` | Per-channel volume |
+| `s` | Keep this app's volume and device after reboot, even with app memory off |
 | `Ctrl-S` | Apply system changes |
 | `:`, `Ctrl-P` | Command palette |
 | `?` | All keys |

@@ -609,10 +609,14 @@ fn mixer_details(app: &mut App, f: &mut Frame, area: Rect) {
     if n.kind().is_stream() {
         kv.section("Privacy");
         let (key, leaks) = remember_key(&n);
-        let remembered = app.cfg.privacy.remember_volumes && app.cfg.privacy.mode != PrivacyMode::None;
+        let always = app.always_remembered(&n);
+        let remembered = always || app.remembers_apps() != (false, false);
         if !remembered {
             kv.note("WirePlumber won't remember this (your settings)", t.ok());
         } else {
+            if always {
+                kv.note("Always remembered (s to undo)", t.accent());
+            }
             kv.note(format!("WirePlumber remembers it as: {key}"), t.dim());
             if leaks {
                 kv.note("⚠ keyed by a title — see Privacy tab", t.warn());
@@ -1031,12 +1035,12 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
             PrivRow::Mode => {
                 let (v, note) = match p.mode {
                     PrivacyMode::All => ("all apps", "WirePlumber's default"),
-                    PrivacyMode::Allowlist => ("only listed apps", "everything else starts fresh"),
-                    PrivacyMode::None => ("nothing", "no per-app memory at all"),
+                    _ if !p.allowlist.is_empty() => ("only listed apps", "everything else starts fresh"),
+                    _ => ("nothing", "no per-app memory at all"),
                 };
                 setting("Remember", Span::styled(v, t.bold()), note)
             }
-            PrivRow::Allowlist => setting("  Allowlist", Span::styled(if p.allowlist.is_empty() { "(empty)".to_string() } else { p.allowlist.join(", ") }, t.bold()), "Enter to edit"),
+            PrivRow::Allowlist => setting("Always remember", Span::styled(if p.allowlist.is_empty() { "(none)".to_string() } else { p.allowlist.join(", ") }, t.bold()), "even when the above are off; “s” on an app"),
             PrivRow::Prune => setting("Clean titles at start", toggle(p.prune_titles_on_start, &t), "delete ⚠ entries each time audio-tui opens"),
             PrivRow::ForgetAll => {
                 let n: usize = app.state_files.iter().map(|f| f.entries.len()).sum();

@@ -57,10 +57,11 @@ remember_volumes = true
 # Remember which output/input each app was sent to
 remember_devices = true
 # "all": remember every app (WirePlumber default)
-# "allowlist": only remember apps listed below; everything else starts fresh
-# "none": remember nothing about apps
+# "none": remember nothing about apps (except the allowlist below)
 mode = "all"
-# App names as shown in the Playback tab, e.g. ["Firefox", "Spotify"]
+# Apps always remembered (volume and device), even when the switches above
+# are off. Names as shown in the Playback tab, e.g. ["Firefox", "Spotify"].
+# Toggle the selected app with "s" in Playback/Recording.
 allowlist = []
 # On start, delete remembered entries whose key is a media/page title
 prune_titles_on_start = false
@@ -189,6 +190,18 @@ pub struct Privacy {
     pub allowlist: Vec<String>,
     #[serde(default)]
     pub prune_titles_on_start: bool,
+}
+
+impl Privacy {
+    /// Whether apps not on the allowlist get their (volume, device) remembered.
+    pub fn remembers(&self) -> (bool, bool) {
+        let on = self.mode == PrivacyMode::All;
+        (self.remember_volumes && on, self.remember_devices && on)
+    }
+
+    pub fn is_listed(&self, names: &[&str]) -> bool {
+        self.allowlist.iter().any(|a| names.iter().any(|n| !n.is_empty() && a.trim() == *n))
+    }
 }
 
 impl Default for Privacy {

@@ -130,7 +130,6 @@ pub fn unescape(s: &str) -> String {
     out
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // counterpart of unescape; used by tests
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for c in s.chars() {
@@ -239,6 +238,27 @@ pub fn remove_entries(path: &Path, raw_keys: &[String]) -> std::io::Result<usize
     Ok(removed)
 }
 
+/// Add or replace one entry (by unescaped key), creating the file if needed.
+pub fn set_entry(path: &Path, group: &str, key: &str, value: &str) -> std::io::Result<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut f = match std::fs::read_to_string(path) {
+        Ok(text) => parse(&name, path, &text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => parse(&name, path, ""),
+        Err(e) => return Err(e),
+    };
+    if f.group.is_empty() {
+        f.group = group.to_string();
+    }
+    f.entries.retain(|e| e.key != key);
+    f.entries.push(Entry { raw_key: escape(key), key: key.to_string(), value: value.to_string(), kind: classify(key) });
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("audio-tui.tmp");
+    std::fs::write(&tmp, render(&f))?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +282,17 @@ Input/Audio:application.id:org.signal.Signal:stream:capture_1={\"volume\":1.0}\n
         assert_eq!(f.entries[3].kind, EntryKind::Stream { dir: "Input".into(), by: "application.id".into(), who: "org.signal.Signal".into() });
         assert_eq!(f.entries[0].summary(), "volume 75%");
         assert_eq!(f.entries[2].summary(), "volume 67%, muted");
+    }
+
+    #[test]
+    fn set_entry_creates_and_replaces() {
+        let path = std::env::temp_dir().join(format!("audio-tui-state-{}", std::process::id())).join("stream-properties");
+        let key = "Output/Audio:application.name:Music Player";
+        set_entry(&path, "stream-properties", key, "{\"volume\":1.0}").unwrap();
+        set_entry(&path, "stream-properties", key, "{\"volume\":0.5}").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "[stream-properties]\nOutput/Audio:application.name:Music\\sPlayer={\"volume\":0.5}\n");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

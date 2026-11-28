@@ -423,11 +423,7 @@ impl App {
     }
 
     pub fn priv_rows(&self) -> Vec<PrivRow> {
-        let mut v = vec![PrivRow::RememberVolumes, PrivRow::RememberDevices, PrivRow::Mode];
-        if self.cfg.privacy.mode == PrivacyMode::Allowlist {
-            v.push(PrivRow::Allowlist);
-        }
-        v.push(PrivRow::Prune);
+        let mut v = vec![PrivRow::RememberVolumes, PrivRow::RememberDevices, PrivRow::Mode, PrivRow::Allowlist, PrivRow::Prune];
         if !self.state_files.is_empty() {
             v.push(PrivRow::ForgetAll);
         }
@@ -1023,7 +1019,7 @@ impl App {
     fn open_menu(&mut self, at: Option<(u16, u16)>) {
         use Action::*;
         let acts: Vec<Action> = match self.ctx() {
-            Ctx::Streams => vec![MoveTo, FollowDefault, AlwaysHere, Mute, Channels, SetVolume, Alias],
+            Ctx::Streams => vec![MoveTo, FollowDefault, AlwaysHere, Remember, Mute, Channels, SetVolume, Alias],
             Ctx::Devices => vec![SetDefault, Mute, Port, Profile, Channels, SetVolume, Latency, Rename, Alias, Disable],
             Ctx::Cards => vec![CardProfile, Rename, Disable],
             Ctx::Virtual => vec![NewVirtual, DeleteVirtual, TempSink, Apply],
@@ -1215,7 +1211,9 @@ impl App {
             }
             Purpose::Allowlist => {
                 let list: Vec<String> = d.value(0).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                self.edit_config(|e| e.set("privacy", "allowlist", Edit::string_list(&list)));
+                if self.edit_config(|e| e.set("privacy", "allowlist", Edit::string_list(&list))) {
+                    self.write_privacy_dropin();
+                }
             }
         }
         true
@@ -1353,6 +1351,7 @@ impl App {
             Action::Rename => "Rename (system)".into(),
             Action::Disable => "Disable (system)".into(),
             Action::Alias => "Display name".into(),
+            Action::Remember => if n.is_some_and(|n| self.always_remembered(n)) { "Stop always remembering this app" } else { "Always remember this app" }.into(),
             other => other.description().into(),
         }
     }
@@ -1489,6 +1488,30 @@ impl App {
                 if self.edit_config(|e| e.add_route(&RouteRule { app: app.clone(), target: dev.0.clone() })) {
                     self.toasts.push(Level::Info, format!("{app} → {} saved — Ctrl-S to apply", dev.1));
                 }
+            }
+            Remember => {
+                let Some(n) = self.selected_node().cloned() else { return };
+                let app = if n.app_name.is_empty() { n.app_binary.clone() } else { n.app_name.clone() };
+                if app.is_empty() {
+                    return self.toasts.push(Level::Warn, "This stream doesn't say which app it is");
+                }
+                let was = self.always_remembered(&n);
+                let mut list: Vec<String> = self.cfg.privacy.allowlist.clone();
+                if was {
+                    list.retain(|a| a.trim() != n.app_name && a.trim() != n.app_binary);
+                } else {
+                    list.push(app.clone());
+                }
+                if !self.edit_config(|e| e.set("privacy", "allowlist", Edit::string_list(&list))) {
+                    return;
+                }
+                self.write_privacy_dropin();
+                if was {
+                    let msg = if self.remembers_apps() == (true, true) { "removed from always-remember" } else { "follows your privacy settings again" };
+                    return self.toasts.push(Level::Ok, format!("{app} {msg}"));
+                }
+                self.save_stream_snapshot(&n);
+                self.toasts.push(Level::Ok, format!("Saved {app}'s volume and device — kept after reboot"));
             }
             SetDefault => {
                 let Some(n) = self.selected_node().cloned() else { return };
@@ -1769,16 +1792,9 @@ impl App {
                 }
             }
             PrivRow::Mode => {
-                let next = match self.cfg.privacy.mode {
-                    PrivacyMode::All => "allowlist",
-                    PrivacyMode::Allowlist => "none",
-                    PrivacyMode::None => "all",
-                };
+                let next = if self.cfg.privacy.mode == PrivacyMode::All { "none" } else { "all" };
                 if self.edit_config(|e| e.set("privacy", "mode", value(next))) {
                     self.apply_privacy_now();
-                    if next == "allowlist" && self.cfg.privacy.allowlist.is_empty() {
-                        self.toasts.push(Level::Info, "Add the apps WirePlumber may remember on the Allowlist row (Ctrl-S applies per-app rules)");
-                    }
                 }
             }
             PrivRow::Allowlist => {
@@ -1786,8 +1802,8 @@ impl App {
                 apps.sort();
                 apps.dedup();
                 let d = Dialog::new(
-                    "Remember only these apps",
-                    &format!("Comma-separated app names. Running now: {}", if apps.is_empty() { "none".into() } else { apps.join(", ") }),
+                    "Always remember these apps",
+                    &format!("Kept even when app memory is off. Comma-separated app names. Running now: {}", if apps.is_empty() { "none".into() } else { apps.join(", ") }),
                     vec![Field::text("Apps", &self.cfg.privacy.allowlist.join(", "))],
                     "Save",
                     Purpose::Allowlist,
@@ -1824,9 +1840,11 @@ impl App {
     }
 
     pub fn remembers_apps(&self) -> (bool, bool) {
-        let p = &self.cfg.privacy;
-        let on = p.mode != PrivacyMode::None;
-        (p.remember_volumes && on, p.remember_devices && on)
+        self.cfg.privacy.remembers()
+    }
+
+    pub fn always_remembered(&self, n: &Node) -> bool {
+        self.cfg.privacy.is_listed(&[n.app_name.as_str(), n.app_binary.as_str()])
     }
 
     /// Privacy switches take effect at once: live via WirePlumber's settings
@@ -1835,6 +1853,12 @@ impl App {
         let (props, target) = self.remembers_apps();
         self.send(Cmd::SetSmSetting { key: "node.stream.restore-props".into(), value: props.to_string(), persist: false });
         self.send(Cmd::SetSmSetting { key: "node.stream.restore-target".into(), value: target.to_string(), persist: false });
+        self.write_privacy_dropin();
+    }
+
+    /// Per-app exceptions are rules, which WirePlumber reads when it starts
+    /// (next login/reboot); the live switches above stay as they are.
+    fn write_privacy_dropin(&mut self) {
         if self.demo {
             return;
         }
@@ -1844,6 +1868,63 @@ impl App {
             self.toasts.push(Level::Error, format!("Couldn't write privacy drop-in: {e}"));
         }
         self.refresh_pending();
+    }
+
+    /// Write the stream's current volume (and device, if pinned) into
+    /// WirePlumber's stream-properties, under the key state-stream.lua uses.
+    /// WirePlumber keeps that file in memory while app memory is on and would
+    /// overwrite it, so memory is switched off around the write, which makes
+    /// it re-read the file when switched back on.
+    fn save_stream_snapshot(&mut self, n: &Node) {
+        let class = n.props.get("media.class").unwrap_or(&n.media_class);
+        let class = class.strip_prefix("Stream/").unwrap_or(class);
+        let key = if n.media_role == "Notification" || n.props.get("media.role").is_some_and(|r| r == "Notification") {
+            format!("{class}:media.role:Notification")
+        } else {
+            let Some((k, v)) = ["application.id", "application.name", "media.name", "node.name"].iter().find_map(|k| n.props.get(*k).filter(|v| !v.is_empty()).map(|v| (*k, v))) else {
+                return self.toasts.push(Level::Warn, "WirePlumber has no name to remember this stream by");
+            };
+            format!("{class}:{k}:{v}")
+        };
+        let mut v = serde_json::Map::new();
+        if n.master_volume {
+            v.insert("volume".into(), n.volumes.first().copied().unwrap_or(1.0).into());
+        } else {
+            v.insert("volume".into(), 1.0.into());
+            v.insert("channelVolumes".into(), n.volumes.clone().into());
+            if !n.channels.is_empty() {
+                v.insert("channelMap".into(), n.channels.clone().into());
+            }
+        }
+        v.insert("mute".into(), n.mute.into());
+        if !self.graph.follows_default(n)
+            && let Some(d) = self.graph.connected_devices(n).first() {
+                v.insert("target".into(), d.name.clone().into());
+            }
+        let value = serde_json::Value::Object(v).to_string();
+        let path = self.state_dir().join("stream-properties");
+        let live: Vec<(String, String)> = ["node.stream.restore-props", "node.stream.restore-target"]
+            .iter()
+            .filter(|k| self.graph.sm_settings.get(**k).is_none_or(|v| v != "false"))
+            .map(|k| (k.to_string(), "true".to_string()))
+            .collect();
+        for (k, _) in &live {
+            self.send(Cmd::SetSmSetting { key: k.clone(), value: "false".into(), persist: false });
+        }
+        let tx = self.tx.clone();
+        let app_tx = self.app_tx.clone();
+        tokio::spawn(async move {
+            if !live.is_empty() {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
+            if let Err(e) = state::set_entry(&path, "stream-properties", &key, &value) {
+                let _ = app_tx.send(AppEv::Toast(Level::Error, format!("Couldn't save to WirePlumber's state: {e}")));
+            }
+            for (key, value) in live {
+                tx(Cmd::SetSmSetting { key, value, persist: false });
+            }
+            let _ = app_tx.send(AppEv::ReloadState);
+        });
     }
 
     /// Delete entries keyed by media titles (privacy.prune_titles_on_start).

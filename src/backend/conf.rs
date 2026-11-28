@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, PrivacyMode, Virtual, VirtualKind};
+use crate::config::{Config, Virtual, VirtualKind};
 
 // ---------------------------------------------------------------- SPA-JSON
 
@@ -259,46 +259,53 @@ fn device_rules(cfg: &Config) -> Option<String> {
     Some(render("Device names, disabled devices and priorities ([devices]).", sections))
 }
 
-/// Rules that mark streams as "don't remember" (allowlist mode), in the
+/// Apps on `[privacy] allowlist` are remembered whatever the switches say.
+/// WirePlumber's global settings override every per-stream rule, so when
+/// there are exceptions, "off" is expressed as rules instead: every stream
+/// gets `state.restore-* = false`, then the listed apps get it back.
+fn exceptions(cfg: &Config) -> Vec<&str> {
+    cfg.privacy.allowlist.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect()
+}
+
+/// Rules that mark streams as "don't remember" except listed apps, in the
 /// shape shared by WirePlumber `stream.rules`, pipewire-pulse `pulse.rules`
 /// and client `stream.rules`.
 fn privacy_stream_rules(cfg: &Config) -> Option<Vec<J>> {
-    if cfg.privacy.mode != PrivacyMode::Allowlist {
+    let (props, target) = cfg.privacy.remembers();
+    let apps = exceptions(cfg);
+    if (props && target) || apps.is_empty() {
         return None;
     }
-    let forget = |on: bool| {
-        obj(vec![("update-props", obj(vec![("state.restore-props", J::Bool(on)), ("state.restore-target", J::Bool(on))]))])
-    };
-    let mut rules = vec![obj(vec![
-        ("matches", J::Arr(vec![obj(vec![("media.class", s("~Stream/.*"))])])),
-        ("actions", forget(false)),
-    ])];
-    let apps: Vec<J> = cfg
-        .privacy
-        .allowlist
-        .iter()
-        .filter(|a| !a.trim().is_empty())
-        .flat_map(|a| [obj(vec![("application.name", s(a))]), obj(vec![("application.process.binary", s(a))])])
-        .collect();
-    if !apps.is_empty() {
-        rules.push(obj(vec![("matches", J::Arr(apps)), ("actions", forget(true))]));
+    let mut off = Vec::new();
+    if !props {
+        off.push(("state.restore-props", J::Bool(false)));
     }
-    Some(rules)
+    if !target {
+        off.push(("state.restore-target", J::Bool(false)));
+    }
+    let on = obj(vec![("update-props", obj(vec![("state.restore-props", J::Bool(true)), ("state.restore-target", J::Bool(true))]))]);
+    let matches: Vec<J> = apps.iter().flat_map(|a| [obj(vec![("application.name", s(a))]), obj(vec![("application.process.binary", s(a))])]).collect();
+    Some(vec![
+        obj(vec![
+            ("matches", J::Arr(vec![obj(vec![("media.class", s("~Stream/.*"))])])),
+            ("actions", obj(vec![("update-props", obj(off))])),
+        ]),
+        obj(vec![("matches", J::Arr(matches)), ("actions", on)]),
+    ])
 }
 
 fn privacy_wireplumber(cfg: &Config) -> Option<String> {
-    let p = &cfg.privacy;
-    let props = p.remember_volumes && p.mode != PrivacyMode::None;
-    let target = p.remember_devices && p.mode != PrivacyMode::None;
     let mut sections = Vec::new();
-    if !props || !target {
-        sections.push((
-            "wireplumber.settings",
-            obj(vec![("node.stream.restore-props", J::Bool(props)), ("node.stream.restore-target", J::Bool(target))]),
-        ));
-    }
     if let Some(rules) = privacy_stream_rules(cfg) {
         sections.push(("stream.rules", J::Arr(rules)));
+    } else {
+        let (props, target) = cfg.privacy.remembers();
+        if !props || !target {
+            sections.push((
+                "wireplumber.settings",
+                obj(vec![("node.stream.restore-props", J::Bool(props)), ("node.stream.restore-target", J::Bool(target))]),
+            ));
+        }
     }
     if sections.is_empty() {
         return None;
@@ -320,13 +327,13 @@ fn routing_rules(cfg: &Config) -> Vec<J> {
 }
 
 /// pipewire-pulse (most desktop apps) and native clients get the same rules.
+/// Privacy rules live only in WirePlumber's drop-in, which is what reads them.
 fn client_rules(cfg: &Config, section: &str) -> Option<String> {
-    let mut rules = privacy_stream_rules(cfg).unwrap_or_default();
-    rules.extend(routing_rules(cfg));
+    let rules = routing_rules(cfg);
     if rules.is_empty() {
         return None;
     }
-    Some(render("Per-app privacy ([privacy] allowlist) and routing ([[routing]]) rules.", vec![(section, J::Arr(rules))]))
+    Some(render("Per-app routing rules ([[routing]]).", vec![(section, J::Arr(rules))]))
 }
 
 fn clock(cfg: &Config) -> Option<String> {
@@ -624,7 +631,7 @@ pub fn pending(files: &[DropIn]) -> Vec<&DropIn> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Band, DeviceRule, RouteRule};
+    use crate::config::{Band, DeviceRule, PrivacyMode, RouteRule};
 
     fn cfg() -> Config {
         Config::default()
@@ -663,17 +670,27 @@ mod tests {
         assert!(!wp.contains("\n  stream.restore"));
 
         let mut c = cfg();
+        c.privacy.allowlist = vec!["Firefox".into()];
+        assert!(privacy_wireplumber(&c).is_none(), "exceptions don't matter when everything is remembered");
+
+        let mut c = cfg();
+        c.privacy.remember_devices = false;
+        c.privacy.allowlist = vec!["Firefox".into()];
+        let wp = privacy_wireplumber(&c).unwrap();
+        assert!(!wp.contains("wireplumber.settings"), "global off would override the exception");
+        assert!(!wp.contains("state.restore-props = false"), "volumes stay remembered for everyone");
+        assert!(wp.contains("state.restore-target = false"));
+
+        let mut c = cfg();
         c.privacy.mode = PrivacyMode::Allowlist;
         c.privacy.allowlist = vec!["Firefox".into()];
         let wp = privacy_wireplumber(&c).unwrap();
         assert!(!wp.contains("wireplumber.settings"));
         assert!(wp.contains("media.class = \"~Stream/.*\""));
         assert!(wp.contains("application.name = \"Firefox\""));
-        let pulse = client_rules(&c, "pulse.rules").unwrap();
-        assert!(pulse.starts_with("# Generated by audio-tui"));
-        assert!(pulse.contains("pulse.rules = ["));
         // Forget-all rule comes before the allowlist rule so it can be overridden.
-        assert!(pulse.find("state.restore-props = false").unwrap() < pulse.find("state.restore-props = true").unwrap());
+        assert!(wp.find("state.restore-props = false").unwrap() < wp.find("state.restore-props = true").unwrap());
+        assert!(client_rules(&c, "pulse.rules").is_none());
     }
 
     #[test]
@@ -682,7 +699,9 @@ mod tests {
         c.routing.push(RouteRule { app: "Spotify".into(), target: "alsa_output.usb".into() });
         c.clock.rate = 48000;
         c.clock.allowed_rates = vec![44100, 48000];
-        let r = client_rules(&c, "stream.rules").unwrap();
+        let r = client_rules(&c, "pulse.rules").unwrap();
+        assert!(r.starts_with("# Generated by audio-tui"));
+        assert!(r.contains("pulse.rules = ["));
         assert!(r.contains("target.object = \"alsa_output.usb\""));
         let k = clock(&c).unwrap();
         assert!(k.contains("default.clock.rate = 48000"));
