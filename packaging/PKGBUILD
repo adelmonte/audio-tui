@@ -9,7 +9,7 @@ license=('GPL-3.0-or-later')
 depends=('pipewire' 'wireplumber' 'gcc-libs' 'glibc')
 makedepends=('cargo' 'clang')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('917799040618a0079ef0a7a05b66609b100eae3fbec0f19673955120dc96a18e')
 options=('!lto')
 
 prepare() {
