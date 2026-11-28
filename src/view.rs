@@ -16,7 +16,7 @@ use crate::backend::state::EntryKind;
 use crate::config::{IconSet, PrivacyMode, VirtualKind};
 use crate::core::keymap::ActionSet;
 use crate::ui::theme::Theme;
-use crate::ui::widgets::{self, centered, checkbox, empty_state, panel, popup, spinner, toggle, truncate, HelpRow};
+use crate::ui::widgets::{self, centered, checkbox, empty_state, fit_line, panel, popup, spinner, toggle, truncate, HelpRow};
 
 pub fn render(app: &mut App, f: &mut Frame) {
     app.mouse.clear();
@@ -44,9 +44,6 @@ pub fn render(app: &mut App, f: &mut Frame) {
 
 fn render_header(app: &mut App, f: &mut Frame, area: Rect) {
     let t = app.theme.clone();
-    let logo = if app.cfg.general.icons == IconSet::Nerd { " 󰕾 audio " } else { " ♪ audio " };
-    let lw = logo.width() as u16;
-    f.render_widget(Span::styled(logo, t.accent().add_modifier(Modifier::BOLD)), Rect { width: lw, ..area });
     let mut right: Vec<Span> = Vec::new();
     if !app.pending.is_empty() {
         let k = app.keymap.hint(Action::Apply).unwrap_or_default();
@@ -57,8 +54,8 @@ fn render_header(app: &mut App, f: &mut Frame, area: Rect) {
         right.push(Span::styled(" DEMO ", Style::default().add_modifier(Modifier::REVERSED)));
         right.push(Span::raw(" "));
     }
-    let tabs_full: u16 = Tab::ALL.iter().enumerate().map(|(i, t)| format!(" {} {} ", i + 1, t.title()).width() as u16 + 1).sum();
-    let room_for_clock = area.width.saturating_sub(lw + 1 + tabs_full) > right.iter().map(|s| s.content.width() as u16).sum::<u16>() + 20;
+    let tabs_full: u16 = Tab::ALL.iter().map(|t| t.title().width() as u16 + 3).sum::<u16>() + 1;
+    let room_for_clock = area.width.saturating_sub(tabs_full) > right.iter().map(|s| s.content.width() as u16).sum::<u16>() + 20;
     if app.disconnected.is_some() {
         right.push(Span::styled("○ disconnected ", t.error()));
     } else if let (Some(r), true) = (app.graph.clock_rate(), room_for_clock) {
@@ -73,7 +70,7 @@ fn render_header(app: &mut App, f: &mut Frame, area: Rect) {
     let rw: u16 = right.iter().map(|s| s.content.width() as u16).sum();
     let titles: Vec<&str> = Tab::ALL.iter().map(|t| t.title()).collect();
     let sel = Tab::ALL.iter().position(|x| *x == app.tab).unwrap_or(0);
-    let tabs_area = Rect { x: area.x + lw + 1, width: area.width.saturating_sub(lw + 1 + rw), ..area };
+    let tabs_area = Rect { width: area.width.saturating_sub(rw), ..area };
     widgets::tabs(f, tabs_area, &titles, sel, &t, &mut app.mouse, Target::Tab);
     if rw <= area.width {
         let r = Rect { x: area.right() - rw, width: rw, ..area };
@@ -357,7 +354,7 @@ fn render_mixer(app: &mut App, f: &mut Frame, area: Rect) {
                 if !sub.is_empty() && room > 6 {
                     left.push(Span::styled(format!("  {}", truncate(&sub, room - 2)), t.dim()));
                 }
-                f.render_widget(Line::from(left), r);
+                f.render_widget(fit_line(Line::from(left), (r.width as usize).saturating_sub(rw as usize + 1)), r);
                 let rr = Rect { x: r.right().saturating_sub(rw), width: rw, ..r };
                 f.render_widget(Line::from(right), rr);
                 app.mouse.add(Rect { width: r.width.saturating_sub(rw), ..r }, Target::Mix(MixSel { node: *id, channel: None }));
@@ -415,8 +412,13 @@ fn render_mixer(app: &mut App, f: &mut Frame, area: Rect) {
     }
 }
 
+enum KvLine<'a> {
+    Line(Line<'a>, Option<Target>),
+    Text(String, Style),
+}
+
 struct Kv<'a> {
-    lines: Vec<(Line<'a>, Option<Target>)>,
+    lines: Vec<KvLine<'a>>,
     t: Theme,
 }
 
@@ -425,49 +427,43 @@ impl<'a> Kv<'a> {
         Self { lines: Vec::new(), t: t.clone() }
     }
     fn title(&mut self, s: &str) {
-        self.lines.push((Line::from(Span::styled(s.to_string(), self.t.accent().add_modifier(Modifier::BOLD))), None));
+        self.lines.push(KvLine::Line(Line::from(Span::styled(s.to_string(), self.t.accent().add_modifier(Modifier::BOLD))), None));
     }
     fn kv(&mut self, k: &str, v: impl Into<String>) {
         let v = v.into();
         if !v.is_empty() {
-            self.lines.push((Line::from(vec![Span::styled(format!("{k:<12}"), self.t.dim()), Span::styled(v, self.t.text())]), None));
+            self.lines.push(KvLine::Line(Line::from(vec![Span::styled(format!("{k:<12}"), self.t.dim()), Span::styled(v, self.t.text())]), None));
         }
     }
     fn kvs(&mut self, k: &str, v: Vec<Span<'a>>, tg: Option<Target>) {
         let mut s = vec![Span::styled(format!("{k:<12}"), self.t.dim())];
         s.extend(v);
-        self.lines.push((Line::from(s), tg));
+        self.lines.push(KvLine::Line(Line::from(s), tg));
     }
     fn gap(&mut self) {
-        self.lines.push((Line::raw(""), None));
+        self.lines.push(KvLine::Line(Line::raw(""), None));
     }
     fn section(&mut self, s: &str) {
         self.gap();
-        self.lines.push((Line::from(Span::styled(s.to_uppercase(), self.t.dim().add_modifier(Modifier::BOLD))), None));
+        self.lines.push(KvLine::Line(Line::from(Span::styled(s.to_uppercase(), self.t.dim().add_modifier(Modifier::BOLD))), None));
     }
+    /// Free text; wrapped to the panel width when rendered.
     fn note(&mut self, s: impl Into<String>, st: Style) {
-        self.lines.push((Line::from(Span::styled(s.into(), st)), None));
-    }
-    fn wrap(&mut self, s: &str, width: usize, st: Style) {
-        let mut line = String::new();
-        for word in s.split_whitespace() {
-            if line.width() + word.width() + 1 > width && !line.is_empty() {
-                self.note(std::mem::take(&mut line), st);
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        if !line.is_empty() {
-            self.note(line, st);
-        }
+        self.lines.push(KvLine::Text(s.into(), st));
     }
     fn render(self, f: &mut Frame, area: Rect, app: &mut App, title: &str) {
         let block = panel(&app.theme, title, false);
         let inner = block.inner(area).inner(Margin::new(1, 0));
         f.render_widget(block, area);
-        for (i, (l, tg)) in self.lines.into_iter().enumerate() {
+        let w = inner.width as usize;
+        let mut rows: Vec<(Line, Option<Target>)> = Vec::new();
+        for l in self.lines {
+            match l {
+                KvLine::Line(l, tg) => rows.push((fit_line(l, w), tg)),
+                KvLine::Text(s, st) => rows.extend(wrap_text(&s, w).into_iter().map(|l| (Line::from(Span::styled(l, st)), None))),
+            }
+        }
+        for (i, (l, tg)) in rows.into_iter().enumerate() {
             if i as u16 >= inner.height {
                 break;
             }
@@ -478,6 +474,49 @@ impl<'a> Kv<'a> {
             }
         }
     }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// First visible row of a list of `len` rows `height` tall so `sel` stays in view.
+fn scroll(app: &mut App, sel: usize, len: usize, height: usize) -> usize {
+    let off = app.list_offset.entry(app.tab).or_insert(0);
+    if sel < *off {
+        *off = sel;
+    } else if height > 0 && sel >= *off + height {
+        *off = sel + 1 - height;
+    }
+    *off = (*off).min(len.saturating_sub(height));
+    *off
+}
+
+/// Word-wraps `s` to `w` cells, hard-breaking words longer than a line.
+fn wrap_text(s: &str, w: usize) -> Vec<String> {
+    let w = w.max(1);
+    let lead: String = s.chars().take_while(|c| *c == ' ').collect();
+    let mut out = Vec::new();
+    let mut line = lead.clone();
+    for word in s.split_whitespace() {
+        if line.trim().is_empty() {
+            line = lead.clone();
+        } else if line.width() + 1 + word.width() <= w {
+            line.push(' ');
+        } else {
+            out.push(std::mem::take(&mut line));
+        }
+        for c in word.chars() {
+            if !line.trim().is_empty() && line.width() + c.to_string().width() > w {
+                out.push(std::mem::take(&mut line));
+            }
+            line.push(c);
+        }
+    }
+    if !line.trim().is_empty() {
+        out.push(line);
+    }
+    out
 }
 
 /// What WirePlumber uses to remember this stream (mirrors state-stream.lua formKey).
@@ -571,7 +610,7 @@ fn mixer_details(app: &mut App, f: &mut Frame, area: Rect) {
         if !remembered {
             kv.note("WirePlumber won't remember this (your settings)", t.ok());
         } else {
-            kv.wrap(&format!("WirePlumber remembers it as: {key}"), width, t.dim());
+            kv.note(format!("WirePlumber remembers it as: {key}"), t.dim());
             if leaks {
                 kv.note("⚠ keyed by a title — see Privacy tab", t.warn());
             }
@@ -606,8 +645,9 @@ fn render_cards(app: &mut App, f: &mut Frame, area: Rect) {
     f.render_widget(block, list_area);
     let rows = app.card_rows();
     let sel = app.row_index();
-    for (i, row) in rows.iter().enumerate().take(inner.height as usize) {
-        let r = Rect { y: inner.y + i as u16, height: 1, ..inner };
+    let off = scroll(app, sel, rows.len(), inner.height as usize);
+    for (i, row) in rows.iter().enumerate().skip(off).take(inner.height as usize) {
+        let r = Rect { y: inner.y + (i - off) as u16, height: 1, ..inner };
         let selected = i == sel;
         let base = if selected { t.selected(true) } else { Style::default() };
         f.render_widget(Span::styled(" ".repeat(r.width as usize), base), r);
@@ -630,7 +670,7 @@ fn render_cards(app: &mut App, f: &mut Frame, area: Rect) {
                 Span::styled("  disabled by your config · Enter to re-enable", t.dim()),
             ]),
         };
-        f.render_widget(line.style(base), r);
+        f.render_widget(fit_line(line, r.width as usize).style(base), r);
         app.mouse.add(r, Target::Row(i));
     }
     let Some(d_area) = details else { return };
@@ -656,7 +696,7 @@ fn render_cards(app: &mut App, f: &mut Frame, area: Rect) {
         let mut spans = vec![Span::styled(if active { "(•) " } else { "( ) " }, if active { t.accent() } else { t.dim() })];
         let st = if p.available == Avail::No { t.dim() } else if active { t.bold() } else { t.text() };
         spans.push(Span::styled(truncate(&p.description, (d_area.width as usize).saturating_sub(8)), st));
-        kv.lines.push((Line::from(spans), Some(Target::ProfilePick { device: id, index: p.index })));
+        kv.lines.push(KvLine::Line(Line::from(spans), Some(Target::ProfilePick { device: id, index: p.index })));
         if let (Some(c), true) = (p.codec(), active) {
             kv.note(format!("     {}", crate::app::codec_note(c)), t.dim());
         }
@@ -674,7 +714,7 @@ fn render_cards(app: &mut App, f: &mut Frame, area: Rect) {
                 Avail::Unknown => "",
             };
             let dev = r.devices.first().copied().unwrap_or(0);
-            kv.lines.push((
+            kv.lines.push(KvLine::Line(
                 Line::from(vec![
                     Span::styled(if on { "● " } else { "○ " }, if on { t.ok() } else { t.dim() }),
                     Span::styled(format!("{dir} "), t.dim()),
@@ -722,8 +762,9 @@ fn render_virtual(app: &mut App, f: &mut Frame, area: Rect) {
         f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner.inner(Margin::new(2, 1)));
         return;
     }
-    for (i, row) in rows.iter().enumerate().take(inner.height as usize) {
-        let r = Rect { y: inner.y + i as u16, height: 1, ..inner };
+    let off = scroll(app, sel, rows.len(), inner.height as usize);
+    for (i, row) in rows.iter().enumerate().skip(off).take(inner.height as usize) {
+        let r = Rect { y: inner.y + (i - off) as u16, height: 1, ..inner };
         let selected = i == sel;
         let base = if selected { t.selected(true) } else { Style::default() };
         f.render_widget(Span::styled(" ".repeat(r.width as usize), base), r);
@@ -749,7 +790,7 @@ fn render_virtual(app: &mut App, f: &mut Frame, area: Rect) {
                 ])
             }
         };
-        f.render_widget(line.style(base), r);
+        f.render_widget(fit_line(line, r.width as usize).style(base), r);
         app.mouse.add(r, Target::Row(i));
     }
     let Some(d_area) = details else { return };
@@ -780,7 +821,7 @@ fn render_virtual(app: &mut App, f: &mut Frame, area: Rect) {
             kv.note("config.toml  →  60-audio-tui-virtual.conf", t.dim());
             if v.kind == VirtualKind::Noise {
                 kv.gap();
-                kv.wrap("Needs the RNNoise LADSPA plugin: pacman -S noise-suppression-for-voice", (d_area.width as usize).saturating_sub(4), t.info());
+                kv.note("Needs the RNNoise LADSPA plugin: pacman -S noise-suppression-for-voice", t.info());
             }
         }
         Some(VirtRow::Live(id)) => {
@@ -789,7 +830,7 @@ fn render_virtual(app: &mut App, f: &mut Frame, area: Rect) {
                 kv.kv("Name", n.name.clone());
                 kv.kv("Factory", n.props.get("factory.name").cloned().unwrap_or_default());
                 kv.gap();
-                kv.wrap("Not managed by your config: it was created temporarily or by another tool. It disappears when PipeWire restarts unless that tool recreates it.", (d_area.width as usize).saturating_sub(4), t.dim());
+                kv.note("Not managed by your config: it was created temporarily or by another tool. It disappears when PipeWire restarts unless that tool recreates it.", t.dim());
             }
         }
         None => {}
@@ -822,32 +863,19 @@ fn render_settings(app: &mut App, f: &mut Frame, area: Rect) {
     let force_rate = g.get("clock.force-rate").filter(|v| *v != "0").cloned();
     let quantum: u32 = g.get("clock.quantum").and_then(|v| v.parse().ok()).unwrap_or(0);
     let force_q = g.get("clock.force-quantum").filter(|v| *v != "0").cloned();
-    let mut y = inner.y;
-    let put = |f: &mut Frame, line: Line, target: Option<Target>, y: &mut u16, app: &mut App, sel_style: Option<Style>| {
-        if *y >= inner.bottom() {
-            return;
-        }
-        let r = Rect { y: *y, height: 1, ..inner };
-        if let Some(st) = sel_style {
-            f.render_widget(Span::styled(" ".repeat(r.width as usize), st), r);
-        }
-        f.render_widget(line, r);
-        if let Some(tg) = target {
-            app.mouse.add(r, tg);
-        }
-        *y += 1;
-    };
-    put(f, Line::from(Span::styled("AUDIO ENGINE (PipeWire)", t.dim().add_modifier(Modifier::BOLD))), None, &mut y, app, None);
+    let mut out: Vec<(Line, Option<Target>, Option<Style>)> = Vec::new();
+    let mut sel_line = 0;
+    out.push((Line::from(Span::styled("AUDIO ENGINE (PipeWire)", t.dim().add_modifier(Modifier::BOLD))), None, None));
     let mut sm_header = false;
     for (i, row) in rows.iter().enumerate() {
         if matches!(row, SetRow::Sm(_)) && !sm_header {
             sm_header = true;
-            y += 1;
-            put(f, Line::from(Span::styled("WIREPLUMBER (session manager) — changes are saved like `wpctl settings --save`", t.dim().add_modifier(Modifier::BOLD))), None, &mut y, app, None);
+            out.push((Line::raw(""), None, None));
+            out.push((Line::from(Span::styled("WIREPLUMBER (session manager) — changes are saved like `wpctl settings --save`", t.dim().add_modifier(Modifier::BOLD))), None, None));
         }
         if row == &SetRow::MaxVolume {
-            y += 1;
-            put(f, Line::from(Span::styled("AUDIO-TUI", t.dim().add_modifier(Modifier::BOLD))), None, &mut y, app, None);
+            out.push((Line::raw(""), None, None));
+            out.push((Line::from(Span::styled("AUDIO-TUI", t.dim().add_modifier(Modifier::BOLD))), None, None));
         }
         let selected = i == sel;
         let base = if selected { Some(t.selected(true)) } else { None };
@@ -899,7 +927,32 @@ fn render_settings(app: &mut App, f: &mut Frame, area: Rect) {
             Span::raw(" ".repeat(pad + 1)),
             Span::styled(note, t.dim()),
         ]);
-        put(f, line, Some(Target::Row(i)), &mut y, app, base);
+        if selected {
+            sel_line = out.len();
+        }
+        out.push((line, Some(Target::Row(i)), base));
+    }
+    let height = inner.height as usize;
+    let off = app.list_offset.entry(Tab::Settings).or_insert(0);
+    // Keep a section header above the first row visible when scrolled to the top.
+    let top = if sel_line <= 2 { 0 } else { sel_line - 1 };
+    if top < *off {
+        *off = top;
+    } else if sel_line >= *off + height {
+        *off = sel_line + 1 - height;
+    }
+    *off = (*off).min(out.len().saturating_sub(height));
+    let off = *off;
+    let w = inner.width as usize;
+    for (row, (line, target, st)) in out.into_iter().enumerate().skip(off).take(height) {
+        let r = Rect { y: inner.y + (row - off) as u16, height: 1, ..inner };
+        if let Some(st) = st {
+            f.render_widget(Span::styled(" ".repeat(r.width as usize), st), r);
+        }
+        f.render_widget(fit_line(line, w), r);
+        if let Some(tg) = target {
+            app.mouse.add(r, tg);
+        }
     }
 }
 
@@ -944,7 +997,7 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
     let inner = block.inner(area).inner(Margin::new(1, 0));
     f.render_widget(block, area);
     let intro = "WirePlumber saves each app's volume and chosen device so they come back next time. It keys them by the app's name, or — for apps that don't give one — by what's playing (a song, video or page title). Entries marked ⚠ are those.";
-    let intro_h = (intro.width() as u16 / inner.width.max(1)) + 1;
+    let intro_h = wrap_text(intro, inner.width as usize).len() as u16;
     f.render_widget(Paragraph::new(intro).wrap(Wrap { trim: true }).style(t.dim()), Rect { height: intro_h, ..inner });
     let list = Rect { y: inner.y + intro_h + 1, height: inner.height.saturating_sub(intro_h + 1), ..inner };
     let rows = app.priv_rows();
@@ -965,7 +1018,10 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
         let base = if selected { t.selected(true) } else { Style::default() };
         f.render_widget(Span::styled(" ".repeat(r.width as usize), base), r);
         let mark = if selected { Span::styled("▌", t.accent()) } else { Span::raw(" ") };
-        let setting = |label: &str, v: Span<'static>, note: &str| Line::from(vec![mark.clone(), Span::styled(format!("{label:<28}"), t.text()), v, Span::raw("   "), Span::styled(note.to_string(), t.dim())]);
+        let setting = |label: &str, v: Span<'static>, note: &str| {
+            let pad = 16usize.saturating_sub(v.content.width()).max(1);
+            Line::from(vec![mark.clone(), Span::styled(format!("{label:<28}"), t.text()), v, Span::raw(" ".repeat(pad)), Span::styled(note.to_string(), t.dim())])
+        };
         let line = match row {
             PrivRow::RememberVolumes => setting("Remember app volumes", toggle(p.remember_volumes, &t), "off = every app starts at the default volume"),
             PrivRow::RememberDevices => setting("Remember app devices", toggle(p.remember_devices, &t), "off = apps always follow the default output"),
@@ -981,7 +1037,7 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
             PrivRow::Prune => setting("Clean titles at start", toggle(p.prune_titles_on_start, &t), "delete ⚠ entries each time audio-tui opens"),
             PrivRow::ForgetAll => {
                 let n: usize = app.state_files.iter().map(|f| f.entries.len()).sum();
-                setting("Forget everything", Span::styled(format!("{n} entries"), t.warn()), "Enter: delete all of WirePlumber's memory")
+                setting("Forget everything", Span::styled(plural(n, "entry", "entries"), t.warn()), "Enter: delete all of WirePlumber's memory")
             }
             PrivRow::File(fi) => {
                 let sf = &app.state_files[*fi];
@@ -990,7 +1046,7 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
                     mark,
                     Span::styled(if open { "▾ " } else { "▸ " }, t.dim()),
                     Span::styled(format!("{} ", sf.name), t.accent().add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("· {} entries · {}", sf.entries.len(), sf.description()), t.dim()),
+                    Span::styled(format!("· {} · {}", plural(sf.entries.len(), "entry", "entries"), sf.description()), t.dim()),
                 ])
             }
             PrivRow::Entry(fi, ei) => {
@@ -1011,7 +1067,7 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
                 ])
             }
         };
-        f.render_widget(line.style(base), r);
+        f.render_widget(fit_line(line, r.width as usize).style(base), r);
         app.mouse.add(r, Target::Row(i));
     }
     if app.state_files.is_empty() {
@@ -1020,7 +1076,11 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
             f.render_widget(Span::styled(format!(" No state files in {} — nothing is remembered.", app.state_dir().display()), t.ok()), Rect { y, height: 1, ..list });
         }
     } else if leaks > 0 {
-        let msg = format!(" {leaks} entr{} keyed by a media title ", if leaks == 1 { "y is" } else { "ies are" });
+        let mut msg = format!(" {leaks} entr{} keyed by a media title ", if leaks == 1 { "y is" } else { "ies are" });
+        let title_w = "Privacy — what WirePlumber remembers".width() as u16 + 5;
+        if area.width < title_w + msg.width() as u16 + 2 {
+            msg = format!(" ⚠ {leaks} ");
+        }
         let w = msg.width() as u16;
         f.render_widget(Span::styled(msg, t.warn().add_modifier(Modifier::REVERSED)), Rect::new(area.right().saturating_sub(w + 2), area.y, w, 1));
     }
@@ -1173,5 +1233,17 @@ mod snapshots {
         a.tab = Tab::Privacy;
         a.reload_state();
         println!("{}", dump(&mut a, 120, 24));
+    }
+
+    #[test]
+    fn snap_sweep() {
+        let mut a = app();
+        a.show_details = true;
+        for tab in Tab::ALL {
+            a.tab = tab;
+            for (w, h) in [(70, 20), (100, 24), (140, 30)] {
+                println!("=== {tab:?} {w}x{h}\n{}", dump(&mut a, w, h));
+            }
+        }
     }
 }

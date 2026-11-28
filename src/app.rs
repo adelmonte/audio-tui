@@ -521,37 +521,52 @@ impl App {
         }
     }
 
-    pub fn on_tick(&mut self) {
+    /// Advances meters and toasts; true when that changed what's on screen.
+    pub fn on_tick(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
-        self.toasts.prune();
+        let mut changed = self.toasts.prune();
         // Meter ballistics: instant attack, ~20 dB/s release, 1.5 s peak hold.
         let fresh: HashMap<u32, Vec<f32>> = std::mem::take(&mut *self.peaks.lock().expect("peaks"));
         let ids: BTreeSet<u32> = self.levels.keys().chain(fresh.keys()).copied().collect();
         for id in ids {
-            let new = fresh.get(&id).cloned().unwrap_or_default();
+            let new = fresh.get(&id).map(Vec::as_slice).unwrap_or(&[]);
             let cur = self.levels.entry(id).or_default();
             if cur.len() < new.len() {
                 cur.resize(new.len(), 0.0);
+                changed = true;
             }
             for (i, c) in cur.iter_mut().enumerate() {
                 let n = new.get(i).copied().map(meter_scale).unwrap_or(0.0);
-                *c = if n > *c { n } else { (*c - 0.011).max(n) };
+                let next = if n > *c { n } else { (*c - 0.011).max(n) };
+                changed |= next != *c;
+                *c = next;
             }
             let tick = self.tick;
             let hold = self.holds.entry(id).or_default();
-            hold.resize(cur.len(), (0.0, 0));
+            if hold.len() != cur.len() {
+                hold.resize(cur.len(), (0.0, 0));
+                changed = true;
+            }
             for (h, c) in hold.iter_mut().zip(cur.iter()) {
                 if *c >= h.0 || tick.saturating_sub(h.1) > 45 {
+                    changed |= h.0 != *c;
                     *h = (*c, tick);
                 }
             }
         }
+        changed
     }
 
-    /// Ask the backend to meter exactly the visible nodes.
+    /// Whether ticks need to run fast (meters live, or something on screen moving).
+    pub fn wants_fast_tick(&self) -> bool {
+        !self.metered.is_empty() || !self.loaded || !self.toasts.is_empty()
+    }
+
     pub fn sync_meters(&mut self) {
         let want: BTreeSet<u32> = if self.cfg.general.meters && self.tab.kind().is_some() && self.disconnected.is_none() { self.visible.clone() } else { BTreeSet::new() };
         if want != self.metered {
+            self.levels.retain(|k, _| want.contains(k));
+            self.holds.retain(|k, _| want.contains(k));
             self.metered = want.clone();
             self.send(Cmd::Meter { nodes: want.into_iter().collect() });
         }
@@ -876,10 +891,11 @@ impl App {
     }
 
     fn overlay_vol(&mut self, id: u32, vols: Vec<f32>, mute: Option<bool>) {
-        let Some(n) = self.graph.nodes.get(&id).cloned() else { return };
+        let Some(n) = self.graph.nodes.get(&id) else { return };
         let route = n.device_id.zip(n.profile_device);
+        let kind = n.kind();
         if let Some((d, pd)) = route {
-            let dir = if n.kind() == NodeKind::Source { Dir::Input } else { Dir::Output };
+            let dir = if kind == NodeKind::Source { Dir::Input } else { Dir::Output };
             if let Some(r) = self.graph.devices.get_mut(&d).and_then(|dev| dev.routes.iter_mut().find(|r| r.device == pd && r.direction == dir))
                 && !r.volumes.is_empty() {
                     r.volumes = vols;

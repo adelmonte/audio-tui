@@ -77,26 +77,50 @@ async fn main() -> color_eyre::Result<()> {
 
     let mut term = core::term::init(app.cfg.general.mouse)?;
     let mut events = EventStream::new();
-    // ~30 fps so meters move smoothly; idle cost is tiny (ratatui only diffs).
-    let mut tick = tokio::time::interval(Duration::from_millis(33));
+    // ~30 fps while meters or spinners move; otherwise wake rarely and only
+    // redraw when something changed.
+    let fast = Duration::from_millis(33);
+    let slow = Duration::from_millis(500);
     let result: color_eyre::Result<()> = async {
+        let mut dirty = true;
+        let mut animated = false;
+        let mut next_tick = tokio::time::Instant::now() + fast;
+        let mut last_draw = tokio::time::Instant::now();
         loop {
-            term.draw(|f| view::render(&mut app, f))?;
-            app.sync_meters();
+            if dirty {
+                term.draw(|f| view::render(&mut app, f))?;
+                animated = ui::widgets::take_animated();
+                app.sync_meters();
+                dirty = false;
+                last_draw = tokio::time::Instant::now();
+            }
             tokio::select! {
                 e = events.next() => match e {
-                    Some(Ok(e)) => app.on_event(e),
+                    Some(Ok(e)) => {
+                        dirty |= ui::widgets::event_redraws(&e);
+                        app.on_event(e);
+                    }
                     Some(Err(e)) => return Err(e.into()),
                     None => break,
                 },
                 Some(ev) = backend.rx.recv() => {
+                    dirty = true;
                     app.on_backend(ev);
                     while let Ok(ev) = backend.rx.try_recv() {
                         app.on_backend(ev);
                     }
                 }
-                Some(ev) = app_rx.recv() => app.on_app_event(ev),
-                _ = tick.tick() => app.on_tick(),
+                Some(ev) = app_rx.recv() => {
+                    dirty = true;
+                    app.on_app_event(ev);
+                }
+                _ = tokio::time::sleep_until(next_tick) => {
+                    let now = tokio::time::Instant::now();
+                    next_tick = now + if animated || app.wants_fast_tick() { fast } else { slow };
+                    // A slow heartbeat redraw catches state that expires on its own
+                    // (volumes PipeWire never echoed back).
+                    dirty |= app.on_tick() | animated | (now - last_draw >= slow);
+                }
             }
             if app.quit {
                 break;
