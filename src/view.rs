@@ -445,7 +445,7 @@ impl<'a> Kv<'a> {
     }
     fn section(&mut self, s: &str) {
         self.gap();
-        self.lines.push(KvLine::Line(Line::from(Span::styled(s.to_uppercase(), self.t.dim().add_modifier(Modifier::BOLD))), None));
+        self.lines.push(KvLine::Line(Line::from(Span::styled(s.to_string(), self.t.dim().add_modifier(Modifier::BOLD))), None));
     }
     /// Free text; wrapped to the panel width when rendered.
     fn note(&mut self, s: impl Into<String>, st: Style) {
@@ -543,11 +543,14 @@ fn mixer_details(app: &mut App, f: &mut Frame, area: Rect) {
     kv.title(&app.title(&n));
     kv.gap();
     if n.kind().is_stream() {
-        kv.kv("App", if n.app_binary.is_empty() { n.app_name.clone() } else { format!("{} ({})", n.app_name, n.app_binary) });
+        let name = clean_app_name(&n.app_name);
+        kv.kv("App", if n.app_binary.is_empty() || n.app_binary.eq_ignore_ascii_case(name) { name.to_string() } else { format!("{name} ({})", n.app_binary) });
         if !n.media_name.is_empty() {
             kv.kv("Playing", truncate(&n.media_name, width.saturating_sub(11)));
         }
-        let api = match n.props.get("client.api").map(String::as_str) {
+        // pipewire-alsa streams carry client.api only on their client.
+        let client_api = n.client_id.and_then(|c| app.graph.clients.get(&c)).map(|c| c.api.as_str()).filter(|a| !a.is_empty());
+        let api = match n.props.get("client.api").map(String::as_str).or(client_api) {
             Some("pipewire-pulse") => "PulseAudio API",
             Some("alsa") => "ALSA (pipewire-alsa)",
             Some("jack") => "JACK API",
@@ -595,7 +598,7 @@ fn mixer_details(app: &mut App, f: &mut Frame, area: Rect) {
     }
     kv.section("Volume");
     for (i, v) in vols.iter().enumerate() {
-        let ch = n.channels.get(i).map(|c| channel_label(c)).unwrap_or("Channel");
+        let ch = if n.master_volume { "Master" } else { n.channels.get(i).map(|c| channel_label(c)).unwrap_or("Channel") };
         let db = linear_to_db(*v);
         let dbs = if db.is_finite() { format!("{db:+.1} dB") } else { "-∞ dB".into() };
         kv.kv(ch, format!("{:>3.0}%  {dbs}", linear_to_percent(*v)));
@@ -865,17 +868,17 @@ fn render_settings(app: &mut App, f: &mut Frame, area: Rect) {
     let force_q = g.get("clock.force-quantum").filter(|v| *v != "0").cloned();
     let mut out: Vec<(Line, Option<Target>, Option<Style>)> = Vec::new();
     let mut sel_line = 0;
-    out.push((Line::from(Span::styled("AUDIO ENGINE (PipeWire)", t.dim().add_modifier(Modifier::BOLD))), None, None));
+    out.push((Line::from(Span::styled("Audio engine (PipeWire)", t.dim().add_modifier(Modifier::BOLD))), None, None));
     let mut sm_header = false;
     for (i, row) in rows.iter().enumerate() {
         if matches!(row, SetRow::Sm(_)) && !sm_header {
             sm_header = true;
             out.push((Line::raw(""), None, None));
-            out.push((Line::from(Span::styled("WIREPLUMBER (session manager) — changes are saved like `wpctl settings --save`", t.dim().add_modifier(Modifier::BOLD))), None, None));
+            out.push((Line::from(Span::styled("WirePlumber (session manager) — changes are saved like `wpctl settings --save`", t.dim().add_modifier(Modifier::BOLD))), None, None));
         }
         if row == &SetRow::MaxVolume {
             out.push((Line::raw(""), None, None));
-            out.push((Line::from(Span::styled("AUDIO-TUI", t.dim().add_modifier(Modifier::BOLD))), None, None));
+            out.push((Line::from(Span::styled("audio-tui", t.dim().add_modifier(Modifier::BOLD))), None, None));
         }
         let selected = i == sel;
         let base = if selected { Some(t.selected(true)) } else { None };
@@ -1052,7 +1055,7 @@ fn render_privacy(app: &mut App, f: &mut Frame, area: Rect) {
             PrivRow::Entry(fi, ei) => {
                 let e = &app.state_files[*fi].entries[*ei];
                 let (warn, who, by) = match &e.kind {
-                    EntryKind::Stream { dir, by, who } => (e.leaks_title(), format!("{} {who}", if dir == "Output" { "▶" } else { "●" }), by.replace("application.", "app.")),
+                    EntryKind::Stream { dir, by, who } => (e.leaks_title(), format!("{} {}", if dir == "Output" { "▶" } else { "●" }, clean_app_name(who)), by.replace("application.", "app.")),
                     _ => (false, e.key.clone(), String::new()),
                 };
                 let sum = e.summary();

@@ -57,7 +57,16 @@ pub struct Node {
     pub mute: bool,
     /// Channel positions, e.g. ["FL", "FR"].
     pub channels: Vec<String>,
+    /// The node only has a single master volume (pipewire-alsa streams), so
+    /// `volumes` holds that one value.
+    pub master_volume: bool,
     pub props: BTreeMap<String, String>,
+}
+
+/// `PipeWire ALSA [music-tui]` → `music-tui`: pipewire-alsa wraps every ALSA
+/// app's name like this.
+pub fn clean_app_name(s: &str) -> &str {
+    s.strip_prefix("PipeWire ALSA [").and_then(|r| r.strip_suffix(']')).unwrap_or(s)
 }
 
 impl Node {
@@ -69,7 +78,7 @@ impl Node {
     pub fn title(&self) -> String {
         let pick = |xs: &[&String]| xs.iter().find(|s| !s.is_empty()).map(|s| s.to_string());
         if self.kind().is_stream() {
-            pick(&[&self.app_name, &self.app_binary, &self.description, &self.name]).unwrap_or_else(|| format!("stream {}", self.id))
+            pick(&[&clean_app_name(&self.app_name).to_string(), &self.app_binary, &self.description, &self.name]).unwrap_or_else(|| format!("stream {}", self.id))
         } else {
             pick(&[&self.description, &self.nick, &self.name]).unwrap_or_else(|| format!("node {}", self.id))
         }
@@ -77,7 +86,9 @@ impl Node {
 
     /// Secondary label: what's playing (streams).
     pub fn subtitle(&self) -> &str {
-        if self.kind().is_stream() && self.media_name != self.app_name {
+        // pipewire-alsa's stream names say nothing about what's playing.
+        let generic = matches!(self.media_name.as_str(), "ALSA Playback" | "ALSA Capture");
+        if self.kind().is_stream() && self.media_name != self.app_name && !generic {
             &self.media_name
         } else {
             ""

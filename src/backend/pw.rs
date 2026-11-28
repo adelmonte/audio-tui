@@ -116,12 +116,20 @@ pub fn channel_name(id: u32) -> String {
 }
 
 /// Volume/mute/channel map out of a Props object (node or route props).
-fn read_props(o: &Object, volumes: &mut Vec<f32>, mute: &mut bool, channels: Option<&mut Vec<String>>, latency: Option<&mut i64>) {
+/// Reads volume/mute/channels from a Props pod. Returns true when the node
+/// only reports a master `volume` (no per-channel volumes).
+fn read_props(o: &Object, volumes: &mut Vec<f32>, mute: &mut bool, channels: Option<&mut Vec<String>>, latency: Option<&mut i64>) -> bool {
     let mut ch_out = None;
     let mut lat_out = None;
+    let mut master = None;
+    let mut per_channel = false;
     for p in &o.properties {
         match (p.key, &p.value) {
-            (libspa_sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(v))) => *volumes = v.clone(),
+            (libspa_sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(v))) if !v.is_empty() => {
+                *volumes = v.clone();
+                per_channel = true;
+            }
+            (libspa_sys::SPA_PROP_volume, Value::Float(v)) => master = Some(*v),
             (libspa_sys::SPA_PROP_mute, Value::Bool(b)) => *mute = *b,
             (libspa_sys::SPA_PROP_channelMap, Value::ValueArray(ValueArray::Id(ids))) => {
                 ch_out = Some(ids.iter().map(|i| channel_name(i.0)).collect::<Vec<_>>());
@@ -135,6 +143,13 @@ fn read_props(o: &Object, volumes: &mut Vec<f32>, mute: &mut bool, channels: Opt
     }
     if let (Some(l), Some(dst)) = (lat_out, latency) {
         *dst = l;
+    }
+    match master {
+        Some(v) if !per_channel => {
+            *volumes = vec![v];
+            true
+        }
+        _ => false,
     }
 }
 
@@ -179,7 +194,7 @@ fn parse_route(o: Object) -> Option<Route> {
             libspa_sys::SPA_PARAM_ROUTE_devices => r.devices = int_array(&p.value),
             libspa_sys::SPA_PARAM_ROUTE_props => {
                 if let Value::Object(o) = p.value {
-                    read_props(&o, &mut r.volumes, &mut r.mute, None, Some(&mut r.latency_offset_ns));
+                    let _ = read_props(&o, &mut r.volumes, &mut r.mute, None, Some(&mut r.latency_offset_ns));
                 }
             }
             _ => {}
@@ -265,9 +280,32 @@ struct Shared {
     dirty: bool,
     /// (device id, param id) -> seq of the batch being received.
     param_seq: HashMap<(u32, u32), i32>,
-    /// Devices whose params changed and must be enumerated again.
-    refetch: HashSet<u32>,
+    /// (device id, param id) -> last flags seen in the device info. PipeWire
+    /// flips the SERIAL bit whenever that param's value changes.
+    param_flags: HashMap<(u32, u32), u32>,
+    /// (device id, param id) that changed and must be enumerated again.
+    refetch: HashSet<(u32, u32)>,
     next_seq: i32,
+    /// Whether the publish timer is armed; it fires once per batch of changes.
+    armed: bool,
+    /// Arms the publish timer (set once it exists).
+    arm: Option<Rc<dyn Fn()>>,
+}
+
+impl Shared {
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.wake();
+    }
+
+    fn wake(&mut self) {
+        if !self.armed
+            && let Some(arm) = &self.arm
+        {
+            self.armed = true;
+            arm();
+        }
+    }
 }
 
 type St = Rc<RefCell<Shared>>;
@@ -295,7 +333,7 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
         Err(e) => return (rx, Err(e.to_string())),
     };
 
-    let st: St = Rc::new(RefCell::new(Shared { graph: Graph { connected: true, ..Default::default() }, dirty: true, param_seq: HashMap::new(), refetch: HashSet::new(), next_seq: 1000 }));
+    let st: St = Rc::new(RefCell::new(Shared { graph: Graph { connected: true, ..Default::default() }, dirty: true, param_seq: HashMap::new(), param_flags: HashMap::new(), refetch: HashSet::new(), next_seq: 1000, armed: false, arm: None }));
     let px: Rc<RefCell<Proxies>> = Rc::default();
 
     // Lost connection (e.g. pipewire restarted): tell the UI and stop.
@@ -306,7 +344,7 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
             move |info| {
                 let mut s = st.borrow_mut();
                 s.graph.server_version = info.version().to_string();
-                s.dirty = true;
+                s.mark_dirty();
             }
         })
         .error({
@@ -343,7 +381,7 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
                         if let (Some(out_node), Some(in_node)) = (out, inp) {
                             let mut s = st.borrow_mut();
                             s.graph.links.push(Link { id: obj.id, out_node, in_node });
-                            s.dirty = true;
+                            s.mark_dirty();
                         }
                     }
                     ObjectType::Client => {
@@ -356,7 +394,7 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
                         };
                         let mut s = st.borrow_mut();
                         s.graph.clients.insert(obj.id, c);
-                        s.dirty = true;
+                        s.mark_dirty();
                     }
                     _ => {}
                 }
@@ -381,28 +419,31 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
                 g.clients.remove(&id);
                 g.links.retain(|l| l.id != id);
                 g.targets.remove(&id);
-                s.dirty = true;
+                s.mark_dirty();
             }
         })
         .register();
 
-    // Publish coalesced snapshots.
+    // Publish coalesced snapshots: a one-shot timer, armed by the first change
+    // after each publish, so the thread sleeps while nothing happens.
     let timer = mainloop.loop_().add_timer({
         let st = st.clone();
         let px = px.clone();
         let ev = ev.clone();
         move |_| {
-            let ids: Vec<u32> = st.borrow_mut().refetch.drain().collect();
-            for id in ids {
+            let wanted: Vec<(u32, u32)> = {
+                let mut s = st.borrow_mut();
+                s.armed = false;
+                s.refetch.drain().collect()
+            };
+            for (id, pt) in wanted {
                 if let Some((d, _)) = px.borrow().devices.get(&id) {
-                    for pt in DEVICE_PARAMS {
-                        let seq = {
-                            let mut s = st.borrow_mut();
-                            s.next_seq = s.next_seq.wrapping_add(1).max(1000);
-                            s.next_seq
-                        };
-                        d.enum_params(seq, Some(pt), 0, u32::MAX);
-                    }
+                    let seq = {
+                        let mut s = st.borrow_mut();
+                        s.next_seq = s.next_seq.wrapping_add(1).max(1000);
+                        s.next_seq
+                    };
+                    d.enum_params(seq, Some(ParamType::from_raw(pt)), 0, u32::MAX);
                 }
             }
             let mut s = st.borrow_mut();
@@ -412,7 +453,21 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
             }
         }
     });
-    let _ = timer.update_timer(Some(Duration::from_millis(50)), Some(Duration::from_millis(50)));
+    // SAFETY: the callbacks that use this only run from inside `mainloop.run()`
+    // below, and `arm` is cleared (dropping the timer) before `mainloop` is.
+    let timer: pw::loop_::TimerSource<'static> = unsafe { std::mem::transmute(timer) };
+    let timer = Rc::new(timer);
+    {
+        let mut s = st.borrow_mut();
+        s.arm = Some(Rc::new({
+            let timer = timer.clone();
+            move || {
+                let _ = timer.update_timer(Some(Duration::from_millis(50)), None);
+            }
+        }));
+        s.wake();
+    }
+    drop(timer);
 
     let cmds = rx.attach(mainloop.loop_(), {
         let st = st.clone();
@@ -424,6 +479,7 @@ fn run(rx: pw::channel::Receiver<Cmd>, ev: UnboundedSender<Ev>, peaks: Peaks) ->
     });
 
     mainloop.run();
+    st.borrow_mut().arm = None;
     let rx = cmds.deattach();
     let _ = ev.send(Ev::Disconnected("PipeWire connection closed — reconnecting…".into()));
     (rx, Ok(()))
@@ -445,7 +501,7 @@ fn bind_node(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalObje
         let mut n = Node { id, ..Default::default() };
         fill_node(&mut n, props);
         s.graph.nodes.insert(id, n);
-        s.dirty = true;
+        s.mark_dirty();
     }
     let listener = node
         .add_listener_local()
@@ -464,7 +520,7 @@ fn bind_node(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalObje
                         merged.extend(p);
                         fill_node(n, &merged);
                     }
-                    s.dirty = true;
+                    s.mark_dirty();
                 }
             }
         })
@@ -478,10 +534,10 @@ fn bind_node(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalObje
                 let mut s = st.borrow_mut();
                 if let Some(n) = s.graph.nodes.get_mut(&id) {
                     let mut ch = n.channels.clone();
-                    read_props(&o, &mut n.volumes, &mut n.mute, Some(&mut ch), None);
+                    n.master_volume = read_props(&o, &mut n.volumes, &mut n.mute, Some(&mut ch), None);
                     n.channels = ch;
                 }
-                s.dirty = true;
+                s.mark_dirty();
             }
         })
         .register();
@@ -514,7 +570,7 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
                 ..Default::default()
             },
         );
-        s.dirty = true;
+        s.mark_dirty();
     }
     let params = DEVICE_PARAMS;
     let listener = device
@@ -525,7 +581,18 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
                 // Route/profile changes (volume, mute, port) only show up as
                 // a PARAMS change; the new values have to be asked for.
                 if info.change_mask().contains(pw::device::DeviceChangeMask::PARAMS) {
-                    st.borrow_mut().refetch.insert(id);
+                    let mut s = st.borrow_mut();
+                    for p in info.params() {
+                        let pt = p.id();
+                        if !DEVICE_PARAMS.contains(&pt) {
+                            continue;
+                        }
+                        let flags = p.flags().bits();
+                        if s.param_flags.insert((id, pt.as_raw()), flags) != Some(flags) {
+                            s.refetch.insert((id, pt.as_raw()));
+                        }
+                    }
+                    s.wake();
                 }
                 if !info.change_mask().contains(pw::device::DeviceChangeMask::PROPS) {
                     return;
@@ -539,7 +606,7 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
                         d.description = g("device.description");
                         d.nick = g("device.nick");
                     }
-                    s.dirty = true;
+                    s.mark_dirty();
                 }
             }
         })
@@ -559,9 +626,10 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
                             d.profiles.clear();
                         }
                         if let Some(p) = parse_profile(o) {
-                            d.profiles.retain(|x| x.index != p.index);
-                            d.profiles.push(p);
-                            d.profiles.sort_by_key(|p| p.index);
+                            match d.profiles.binary_search_by_key(&p.index, |x| x.index) {
+                                Ok(i) => d.profiles[i] = p,
+                                Err(i) => d.profiles.insert(i, p),
+                            }
                         }
                     }
                     ParamType::Profile => {
@@ -589,7 +657,7 @@ fn bind_device(registry: &pw::registry::RegistryRc, obj: &pw::registry::GlobalOb
                     }
                     _ => {}
                 }
-                s.dirty = true;
+                s.mark_dirty();
             }
         })
         .register();
@@ -648,7 +716,7 @@ fn bind_metadata(registry: &pw::registry::RegistryRc, obj: &pw::registry::Global
                     }
                     _ => {}
                 }
-                s.dirty = true;
+                s.mark_dirty();
                 0
             }
         })
@@ -712,7 +780,14 @@ fn metadata(px: &Rc<RefCell<Proxies>>, name: &str, f: impl FnOnce(&pw::metadata:
 fn execute(cmd: Cmd, core: &pw::core::CoreRc, registry: &pw::registry::RegistryRc, st: &St, px: &Rc<RefCell<Proxies>>, ev: &UnboundedSender<Ev>, peaks: &Peaks) {
     match cmd {
         Cmd::SetVolume { node, volumes } => {
-            node_or_route(node, vec![prop(libspa_sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(volumes)))], st, px)
+            let master = st.borrow().graph.nodes.get(&node).is_some_and(|n| n.master_volume);
+            let p = if master {
+                let v = volumes.iter().sum::<f32>() / volumes.len().max(1) as f32;
+                prop(libspa_sys::SPA_PROP_volume, Value::Float(v))
+            } else {
+                prop(libspa_sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(volumes)))
+            };
+            node_or_route(node, vec![p], st, px)
         }
         Cmd::SetMute { node, mute } => node_or_route(node, vec![prop(libspa_sys::SPA_PROP_mute, Value::Bool(mute))], st, px),
         Cmd::SetLatencyOffset { node, ns } => node_or_route(node, vec![prop(libspa_sys::SPA_PROP_latencyOffsetNsec, Value::Long(ns))], st, px),
