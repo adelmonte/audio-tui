@@ -1,6 +1,6 @@
 # Maintainer: adelmonte
 pkgname=audio-tui
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc='A modern terminal mixer and control panel for PipeWire'
 arch=('x86_64')
@@ -9,7 +9,7 @@ license=('GPL-3.0-or-later')
 depends=('pipewire' 'wireplumber' 'gcc-libs' 'glibc')
 makedepends=('cargo' 'clang')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('7fe7d4f45f25a053e8a620756bae644230a16d730798564f73eec0312e0f53ab')
+sha256sums=('SKIP')
 options=('!lto')
 
 prepare() {
